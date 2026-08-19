@@ -15,12 +15,11 @@
 5. [Full Pipeline Flow](#full-pipeline-flow)
 6. [Component Reference](#component-reference)
 7. [Guardrails](#guardrails)
-8. [Redis — Where and Why](#redis--where-and-why)
-9. [Model Routing (SLM vs LLM)](#model-routing-slm-vs-llm)
+8. [Model Provider Configuration](#model-provider-configuration)
+9. [Redis — Where and Why](#redis--where-and-why)
 10. [Skills (Extension Layer)](#skills-extension-layer)
-11. [Developer Deployment Segments](#developer-deployment-segments)
-12. [Design Principles](#design-principles)
-13. [What's Deferred and Why](#whats-deferred-and-why)
+11. [Design Principles](#design-principles)
+12. [What's Deferred and Why](#whats-deferred-and-why)
 
 ---
 
@@ -82,8 +81,8 @@ Step = {
 Run = {
   id, repo, failing_commit
   steps: [Step, Step, ...]
-  budget: { max_tokens, max_retries, max_wall_clock }
-  spent: { tokens_used, retries_used, time_used }
+  budget: { max_tokens, max_retries_mechanical, max_retries_structural, max_retries_semantic, max_wall_clock }
+  spent: { tokens_used, retries_used_mechanical, retries_used_structural, retries_used_semantic, time_used }
   final_status: healed | escalated | failed
 }
 ```
@@ -172,10 +171,18 @@ A deterministic dispatch function. Given the classification and attribution, sel
 Retry with backoff, or deterministic rerouting around a known-equivalent tool/endpoint. No model involved.
 
 ### Structural Handler
-A single, tightly-scoped model call to correct a malformed config/output against a known schema. Uses a small model (SLM) by default; escalates to the larger model only if the change's size/scope exceeds a stated capacity limit.
+Calls a configured model provider to correct malformed config/output. User chooses which provider in `.env`:
+- Default: Groq (fast, cost-effective)
+- Alternative: OpenAI, Anthropic, OpenRouter
+- Fixed temperature (0.0) for deterministic fixes
 
 ### Semantic Handler
-Uses the Attribution Engine's evidence to propose an actual code fix. Always uses the larger, more capable model — this is the one place model quality is never downgraded, since it's the core differentiator of the whole system.
+Calls a configured model provider to propose code fixes for logic failures. User chooses which provider in `.env`:
+- Default: Groq (recommended for testing)
+- Production: OpenAI GPT-4 (highest quality), Anthropic Claude (strong reasoning)
+- Temperature: 0.7 for balanced exploration
+
+**Key insight**: User decides which model for which task. Not locked to "SLM for structural, LLM for semantic." You can use Groq for both, or OpenAI for semantic + Groq for structural, or any other combination.
 
 ### Output Guardrail *(adopted)*
 Scans generated fixes before they reach the Verifier — for leaked secrets, unsafe patterns, or content that looks like it's weakening the test suite itself rather than fixing the underlying bug.
@@ -191,7 +198,29 @@ auto_apply_eligible = (
 ```
 
 ### Scope Guard
-Hard, fixed safety rules — not confidence-based. A patch touching more than a stated number of files, or one that modifies the CI configuration/test files themselves, is automatically excluded from auto-apply regardless of how confident the attribution was. Protects against a fix that "passes" by weakening its own verification.
+Hard, fixed safety rules — not confidence-based. Enforces two separate concerns:
+
+**Numeric Limits (Configurable per repo/org):**
+- Max files touched (default: 5, configurable via `ScopeConfig`)
+- Max lines changed (default: 100, configurable via `ScopeConfig`)
+- Falls back to safe defaults if no config exists (never fails open)
+
+**Protected File Patterns (Hardcoded, not configurable alongside limits):**
+- CI configuration files (`.github/workflows`, `.gitlab-ci.yml`, Jenkinsfile, etc.)
+- Test files (`test_*.py`, `*.test.js`, etc.)
+- Security-sensitive files (`security.py`, `auth.py`, `crypto.py`, etc.)
+- Build and dependency config (`setup.py`, `package.json`, `docker-compose.yml`, etc.)
+
+Protected paths can only be overridden with an explicit, separately-named flag (`allow_protected_paths_override`) that requires substantive justification in `protected_paths_override_reason`. This separation prevents casual loosening of safety limits. A patch modifying protected files is automatically excluded from auto-apply regardless of confidence, unless override is explicitly enabled by a developer.
+
+**Important: Access Control for Configuration**
+
+`ScopeConfigManager.set_config()` has **no built-in access control** — it is a data structure with no enforcement boundary. Deployers are responsible for gating calls to `set_config()` behind an admin-only path:
+- Configuration file checked into version control (with code review)
+- Admin-only API endpoint (authentication + authorization required)
+- Manual approval process (separate from the pipeline)
+
+If a compromised CI job, untrusted Skill, or malicious handler can reach `set_config()` directly, it can weaken scope limits or enable protected-paths override. This is **by design** — the safety boundary is external, not internal — but it means deployment security depends entirely on the deployer correctly isolating configuration changes outside the pipeline execution path.
 
 ### Verifier
 Runs the real test suite in an isolated sandbox. Returns pass/fail — nothing else. **This is the only component in the entire system permitted to mark a Step as `success`.** No handler, model, or confidence score can self-certify.
@@ -245,21 +274,101 @@ Redis is used only where the actual requirement is **shared, atomic, cross-proce
 
 ---
 
-## Model Routing (SLM vs LLM)
+## Per-Layer Retry Budgets
 
-Routing is a **deterministic function**, not an agent — an LLM deciding "should I use an LLM" adds cost exactly where the system is trying to avoid it.
+Kintsugi uses per-layer retry budgets to prevent cheap operations from exhausting the budget of expensive ones. Each layer has its own retry limit:
 
+- **Mechanical retries** (default: 5) — Cheap, no LLM calls. Retry/backoff logic.
+- **Structural retries** (default: 3) — Moderate cost. Uses SLM for config/format fixes.
+- **Semantic retries** (default: 2) — Expensive. Uses LLM for logic fixes.
+
+This prevents a situation where trivial mechanical retries consume all the retry budget, leaving semantic repairs unable to attempt fixes for genuinely complex issues.
+
+Configure in `.env`:
+```bash
+MAX_RETRIES_MECHANICAL=5    # Mechanical layer: up to 5 retries
+MAX_RETRIES_STRUCTURAL=3    # Structural layer: up to 3 retries
+MAX_RETRIES_SEMANTIC=2      # Semantic layer: up to 2 retries
+MAX_RETRIES_TOTAL=7         # Hard outer ceiling: tighter than sum (5+3+2=10)
 ```
-route(task) -> model_tier
 
-mechanical            → no model at all
-structural, small     → SLM
-structural, large     → LLM   (capacity/context reasons, not depth-of-reasoning reasons)
-semantic               → LLM, always, no exceptions
-compression/extraction → SLM, always
+**Why MAX_RETRIES_TOTAL is set to 7, not 10**: The total is deliberately *tighter* than the sum of per-layer maximums. This forces escalation if a Run churns through multiple layers even if no single layer is exhausted. Example: a Run could do 3 mechanical + 2 structural + 2 semantic = 7 total retries and hit the ceiling despite each layer respecting its own budget. This prevents pathological retry patterns that would be individually acceptable but collectively wasteful.
+
+**Per-layer enforcement is primary** (mechanical, structural, semantic checked first).
+**Total ceiling is secondary safety net** (checked before per-layer limits when evaluating budget exhaustion, like how max_tokens caps the whole Run regardless of spend distribution).
+
+Error messages are distinct:
+- `"Overall retry budget exhausted: 7/7 total retries"` — ceiling hit
+- `"Semantic retry budget exhausted: 2/2"` — layer-specific limit hit
+
+Each layer's retry count is tracked independently in `Run.spent`:
+- `spent.retries_used_mechanical` — Mechanical retries consumed
+- `spent.retries_used_structural` — Structural retries consumed
+- `spent.retries_used_semantic` — Semantic retries consumed
+
+When any limit is hit (per-layer or total), repair handlers are disabled for the run, but other layers can continue using their full budgets until their limits are reached.
+
+---
+
+## Model Provider Configuration
+
+**Kintsugi now supports real LLM/SLM providers.** You choose which models to use in `.env`:
+
+### Supported Providers
+
+- **Groq** (Mixtral 8x7B) — Fast, cost-effective (~$0.00024/1k tokens) — **recommended for testing**
+- **OpenAI** (GPT-4, GPT-3.5) — High quality reasoning (~$0.003/1k tokens)
+- **Anthropic** (Claude) — Excellent analysis (~$0.015/1k tokens)
+- **OpenRouter** — Many models, fallback support
+
+### Quick Start
+
+```bash
+# 1. Copy .env.example to .env
+cp .env.example .env
+
+# 2. Choose providers and add API keys (example):
+SEMANTIC_PROVIDER=groq
+STRUCTURAL_PROVIDER=groq
+GROQ_API_KEY=gsk_your_key_here
+
+# 3. Pipeline automatically uses these
+python -c "from src.pipeline import KintsugiPipeline; p = KintsugiPipeline()"
 ```
 
-The distinction between "large → LLM" (a capacity limit) and "semantic → LLM" (a reasoning-depth requirement) is deliberate — they're different justifications that happen to point to the same tier, and conflating them would blur why each rule exists.
+### Configuration Examples
+
+**Testing (Groq - cheapest):**
+```bash
+SEMANTIC_PROVIDER=groq
+STRUCTURAL_PROVIDER=groq
+GROQ_API_KEY=gsk_...
+```
+
+**Production (Best quality):**
+```bash
+SEMANTIC_PROVIDER=openai
+STRUCTURAL_PROVIDER=groq
+OPENAI_API_KEY=sk_...
+GROQ_API_KEY=gsk_...
+```
+
+**Maximum Quality:**
+```bash
+SEMANTIC_PROVIDER=anthropic
+STRUCTURAL_PROVIDER=anthropic
+ANTHROPIC_API_KEY=claude_...
+```
+
+### Features
+
+- **Flexible**: User chooses provider for each task
+- **Automatic Retry**: Exponential backoff on rate limits, timeouts, errors
+- **Cost Tracking**: Token usage and cost logged per call
+- **No Secrets in Code**: All API keys in `.env` file
+- **CI/CD Ready**: Requires Groq API key (cheap, reliable, fast)
+
+See `MODEL_CONFIGURATION.md` for detailed setup and cost comparison.
 
 ---
 
@@ -278,36 +387,33 @@ This is what makes it safe to eventually let any developer write and share Skill
 
 ## Developer Deployment Segments
 
-Kintsugi is designed so its behavior — not just its deployment — adapts to different environments, via a capability-declared model provider interface rather than hardcoded per-provider logic:
+Kintsugi uses a flexible model provider interface. Choose which provider to use for each task in `.env`:
 
-```
-ModelProvider = {
-  reasoning(prompt, budget) -> output
-  compress(prompt, budget) -> output   [optional]
-  capabilities: {
-    supports_prompt_caching, max_context,
-    est_cost_per_token,   [null for self-hosted/local]
-    latency_class, reliability
-  }
-}
+```bash
+SEMANTIC_PROVIDER=groq           # or: openai, anthropic, openrouter
+STRUCTURAL_PROVIDER=groq         # or: openai, anthropic, openrouter
+GROQ_API_KEY=gsk_...
 ```
 
-### Cloud API (current build target)
-Best available model quality, zero infrastructure to manage, real provider-side prompt caching, no cold-start problems. Every other component in this document is built and tested against this segment first.
+**Provider Options:**
+- **Groq**: Fast, cost-effective — recommended for testing
+- **OpenAI**: High quality GPT-4 — recommended for production semantic repairs
+- **Anthropic**: Strong reasoning Claude — alternative for complex analysis
+- **OpenRouter**: Many models, fallback support
 
-### Self-Hosted (designed for, not built yet)
-Full data control, no per-token billing (budgets shift to time/attempts instead of dollars). Real tradeoff: keeping both model tiers resident costs VRAM/memory; the alternative is accepted cold-start latency.
+**Features:**
+- Automatic retry with exponential backoff
+- Token usage and cost tracking
+- All API keys in `.env`, not in code
+- CI/CD uses Groq (fast, cheap, reliable)
 
-### Local / Ollama (designed for, not built yet)
-Zero marginal cost, fully offline, strongest privacy. Real tradeoff: weaker model quality directly affects the Attribution Engine's evidence quality — the system compensates automatically by leaning more conservative (more escalation, less auto-apply) rather than silently pretending the evidence is as strong as it would be on a larger model.
-
-**The guiding principle across all three:** one architecture, behavior that honestly adapts to what's true about each environment — not a uniform behavior forced onto all three, and not three separate systems.
+See `MODEL_CONFIGURATION.md` for complete setup guide.
 
 ---
 
 ## Design Principles
 
-1. **Deterministic wherever possible; LLM only where reasoning is genuinely required.**
+1. **Deterministic wherever possible; model only where reasoning is genuinely required.**
 2. **Explainable over scored** — attribution and confidence are structured evidence, not a self-reported float.
 3. **Only the Verifier can claim success** — no component may self-certify.
 4. **Humans decide what only humans can know** — priority ordering is a human call, supported by system-generated context, not replaced by it.
@@ -324,7 +430,7 @@ These are real, designed pieces of the architecture — deferred in build order,
 - **Skills marketplace** — the extension contract is designed now; opening it to arbitrary third-party authorship comes after the core pyramid is proven on real failures.
 - **Fix-cache** — build once real repeat-failure data exists to justify it; premature caching optimizes a system that hasn't been proven yet.
 - **Context-bucket tiering for semantic retries** — build once measured context bloat on real retries justifies it.
-- **Self-hosted / local full support** — the interface doesn't preclude either; the implementation work is deferred until a real user in either segment exists.
+- **Self-hosted / local full support** — provider interface supports it; implementation deferred until a real user in that segment exists.
 
 ---
 
