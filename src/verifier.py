@@ -1,117 +1,120 @@
-"""Verifier: Runs tests to verify repairs work"""
+"""Verifier: runs the repo's real test suite against the proposed fix"""
 
-import subprocess
-import time
 from typing import Tuple, Optional, Dict, Any
 from src.models import Run, Step, StepType, StepLayer, StepStatus, Cost
+from src.sandbox import RepoSandbox
 
 
 class Verifier:
     """
     The ONLY component in the system permitted to mark a Step as `success`.
-    
+
     No handler, model, or confidence score can self-certify.
     Only the Verifier can claim that a fix actually worked.
-    
-    In CI/CD context, this means running the real test suite in an isolated
-    sandbox and returning pass/fail — nothing else.
+
+    How it verifies (see src/sandbox.py):
+      1. Take the patch from the most recent REPAIR step (`repair_output.fix_patch`).
+      2. Create a throwaway git worktree of the repo's configured local
+         checkout at the Run's failing commit.
+      3. `git apply` the patch. A patch that does not apply is a FAIL.
+      4. Run the configured test command (KINTSUGI_TEST_COMMAND, default
+         `python -m pytest -q --tb=short`). Exit code 0 is a PASS; anything
+         else (including a timeout) is a FAIL.
+
+    Mechanical repairs carry no patch: their "fix" is a retry, so the suite is
+    re-run unchanged at the failing commit.
+
+    It never passes by default. No configured checkout, no patch, a patch that
+    doesn't apply, a missing test runner: all FAIL with the reason recorded.
     """
-    
-    def __init__(self, sandbox_cmd: Optional[str] = None, timeout_ms: int = 30000):
+
+    def __init__(
+        self,
+        sandbox_cmd: Optional[str] = None,
+        timeout_ms: Optional[int] = None,
+        sandbox: Optional[RepoSandbox] = None,
+    ):
         """
         Initialize verifier.
-        
+
         Args:
-            sandbox_cmd: Command to run tests (e.g., "pytest", "npm test")
-            timeout_ms: Timeout for test execution in milliseconds
+            sandbox_cmd: Test command override (e.g. "pytest -q", "npm test").
+                Ignored when `sandbox` is passed.
+            timeout_ms: Test timeout override in milliseconds. Ignored when
+                `sandbox` is passed.
+            sandbox: Shared RepoSandbox (the pipeline passes one so the
+                Verifier, counterfactual and Action Layer use the same config).
         """
-        self.sandbox_cmd = sandbox_cmd or "pytest --tb=short -q"
-        self.timeout_ms = timeout_ms
-    
+        self.sandbox = sandbox or RepoSandbox(
+            test_command=sandbox_cmd,
+            timeout_seconds=(timeout_ms / 1000.0) if timeout_ms else None,
+        )
+        self.sandbox_cmd = self.sandbox.test_command
+        self.timeout_ms = int(self.sandbox.timeout_seconds * 1000)
+
     def verify(self, run: Run) -> Tuple[bool, str, Dict[str, Any]]:
         """
-        Run test suite to verify the proposed fix.
-        
+        Apply the proposed fix in a sandbox worktree and run the test suite.
+
         Args:
             run: The Run with proposed fix to verify
-            
+
         Returns:
-            Tuple of (pass, reason, output)
+            Tuple of (pass, reason, output). `output` carries the test counts,
+            exit code, timing and the tail of the test output.
         """
-        # In a real system, we'd:
-        # 1. Create isolated sandbox environment
-        # 2. Apply the proposed fix
-        # 3. Run test suite with timeout
-        # 4. Capture output
-        # 5. Return verdict
-        
-        # For now, simulate the verification
-        return self._simulate_verification(run)
-    
-    def _simulate_verification(self, run: Run) -> Tuple[bool, str, Dict[str, Any]]:
-        """
-        Simulate test verification for demo purposes.
-        
-        In production, this would actually run tests.
-        
-        Args:
-            run: The Run to verify
-            
-        Returns:
-            Tuple of (pass, reason, output)
-        """
-        # Check if there's a repair step
+        # AX-VERIFIED: verify() returns pass only when the test command exited 0
+        # after the patch applied; every setup problem returns False.
+        # (tests/test_sandbox.py::TestVerifier)
         repair_step = self._get_last_repair_step(run)
-        
         if not repair_step:
             return False, "No repair to verify", {}
-        
-        # Simulate test execution
-        # In real system: subprocess.run(self.sandbox_cmd, timeout=self.timeout_ms/1000)
-        
-        # Heuristic: If the repair was from semantic layer with counterfactual "pass",
-        # simulate high success rate
-        if self._is_high_confidence_repair(run):
-            return True, "All tests passed", {
-                'tests_run': 10,
-                'tests_passed': 10,
-                'tests_failed': 0,
-                'execution_time_ms': 2500,
+
+        repair_output = repair_step.output.get('repair_output') or {}
+        patch = repair_output.get('fix_patch')
+        if repair_step.layer == StepLayer.MECHANICAL:
+            patch = None  # a mechanical "fix" is a retry: re-run the suite unchanged
+        elif not (patch or "").strip():
+            return False, "Repair produced no patch to verify", {'patch_applied': False}
+
+        if not self.sandbox.is_configured(run.repo):
+            return False, self.sandbox.not_configured_reason(run.repo), {'patch_applied': False}
+
+        result = self.sandbox.run_with_patch(run.repo, run.failing_commit, patch)
+        if not result.applied:
+            return False, f"Patch did not apply: {result.apply_error}", {
+                'patch_applied': False, 'apply_error': result.apply_error,
             }
-        
-        # Otherwise, simulate moderate success
-        return True, "Tests passed (simulated)", {
-            'tests_run': 10,
-            'tests_passed': 10,
-            'tests_failed': 0,
-            'execution_time_ms': 1500,
-        }
-    
+
+        output = result.tests.to_dict()
+        output['patch_applied'] = patch is not None
+        output['verified_commit'] = result.head_commit
+        if result.tests.timed_out:
+            return False, f"Tests timed out after {self.sandbox.timeout_seconds:.0f}s", output
+        if result.passed:
+            return True, "All tests passed", output
+        return False, (
+            f"Tests failed (exit {result.tests.returncode}: "
+            f"{output['tests_failed']} failed, {output['tests_errored']} errors)"
+        ), output
+
     def _get_last_repair_step(self, run: Run) -> Optional[Step]:
         """Get the most recent repair step"""
         for step in reversed(run.steps):
             if step.type == StepType.REPAIR:
                 return step
         return None
-    
-    def _is_high_confidence_repair(self, run: Run) -> bool:
-        """Check if repair has high-confidence attribution"""
-        for step in reversed(run.steps):
-            if step.type == StepType.ATTRIBUTION and step.attribution:
-                if step.attribution.counterfactual_result == "pass":
-                    return True
-        return False
-    
+
     def create_verification_step(self, run: Run, passed: bool, reason: str, output: Dict[str, Any]) -> Step:
         """
         Create verification step to add to run.
-        
+
         Args:
             run: The Run being verified
             passed: Whether verification passed
             reason: Reason/summary
             output: Test output data
-            
+
         Returns:
             Step object representing verification
         """
@@ -131,14 +134,14 @@ class Verifier:
             cost=Cost(tokens_used=0, wall_clock_ms=int(output.get('execution_time_ms', 0)))
         )
         return step
-    
+
     def verify_and_record(self, run: Run) -> bool:
         """
         Verify fix and add verification step to run.
-        
+
         Args:
             run: The Run to verify
-            
+
         Returns:
             Whether verification passed
         """

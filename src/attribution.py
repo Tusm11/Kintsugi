@@ -1,9 +1,12 @@
 """Attribution Engine: Determines root cause for semantic failures using counterfactual reasoning"""
 
+import hashlib
+import keyword
 import re
 from typing import Dict, Any, List, Optional, Tuple
 from dataclasses import dataclass, field
 from src.models import Run, Step, StepType, StepLayer, StepStatus, Attribution
+from src.sandbox import RepoSandbox, failing_test_ids
 
 
 @dataclass
@@ -34,9 +37,15 @@ class AttributionEngine:
     - The result of the counterfactual intervention
     """
     
-    def __init__(self):
-        """Initialize attribution engine"""
-        self.counterfactual_cache: Dict[str, CounterfactualResult] = {}
+    def __init__(self, sandbox: Optional[RepoSandbox] = None):
+        """
+        Initialize attribution engine.
+        
+        Args:
+            sandbox: RepoSandbox used to execute counterfactuals (default: from env)
+        """
+        self.sandbox = sandbox or RepoSandbox()
+        self.counterfactual_cache: Dict[str, Tuple[CounterfactualResult, str]] = {}
     
     def _parse_diff_changes(self, diff: str) -> List[Dict[str, str]]:
         """
@@ -286,76 +295,67 @@ List evidence that contradicts this cause (one per line, be specific):"""
             
             return (evidence or ["Limited counter-evidence available - model unavailable"], attribution_source)
     
-    def _test_counterfactual(self, cause: str, diff: str, run: Run) -> Tuple[CounterfactualResult, str]:
+    def _test_counterfactual(
+        self, cause: str, diff: str, run: Run, evidence: Optional[List[str]] = None
+    ) -> Tuple[CounterfactualResult, str]:
         """
-        Test the counterfactual: "If we undo this suspected cause, does the test pass?"
+        Test the counterfactual for real: undo the suspected cause and re-run the failing tests.
         
-        Uses semantic model to reason through the counterfactual scenario.
+        1. Pick the diff hunks that implement the suspected cause
+           (`select_cause_hunks`: hunks whose file, or whose changed code's
+           identifiers, are named in the cause/evidence; or the only hunk).
+        2. In a sandbox worktree at the failing commit, reverse-apply just
+           those hunks (`git apply -R`).
+        3. Run the tests that failed (node ids parsed from the logs; the full
+           suite if none can be parsed).
+        
+        Outcome: "pass" = undoing the cause makes the failing tests pass (cause
+        confirmed); "fail" = they still fail; "inconclusive" = the cause could
+        not be isolated to specific hunks, the hunks did not reverse-apply, or
+        no local checkout is configured for the repo.
+        
+        No model is involved, so this step never affects attribution_source.
         
         Args:
             cause: The suspected cause
-            diff: Unified diff
+            diff: Unified diff of the failing commit
             run: The run being analyzed
+            evidence: Supporting evidence lines (help locate the hunks)
             
         Returns:
-            Tuple of (CounterfactualResult, source) where source is "model" or "fallback_heuristic"
-            Source is set STRUCTURALLY based on whether model call succeeded.
+            Tuple of (CounterfactualResult, source) where source is "execution"
+            when tests actually ran, else "not_executed".
         """
-        from src.model_provider import get_provider
-        from src.prompts import CounterfactualPrompt
+        hunks_patch, selection_note = select_cause_hunks(cause, evidence or [], diff)
+        if hunks_patch is None:
+            return CounterfactualResult(cause, "fail", "inconclusive", f"Not executed: {selection_note}"), "not_executed"
+        if not self.sandbox.is_configured(run.repo):
+            return CounterfactualResult(
+                cause, "fail", "inconclusive", f"Not executed: {self.sandbox.not_configured_reason(run.repo)}"
+            ), "not_executed"
         
-        # Cache check
-        cache_key = f"{cause}:{hash(diff)}"
+        cache_key = f"{run.repo}:{run.failing_commit}:{hashlib.sha256(hunks_patch.encode()).hexdigest()}"
         if cache_key in self.counterfactual_cache:
-            cached_result, cached_source = self.counterfactual_cache[cache_key]
-            return (cached_result, cached_source)
+            return self.counterfactual_cache[cache_key]
         
-        # Use model to reason about counterfactual
-        provider = get_provider("semantic")
-        
-        prompt = CounterfactualPrompt.generate(
-            attributed_cause=cause,
-            failure_logs=run.failure_logs,
-            proposed_fix=diff
-        )
-        success, response = provider.call_with_retry(
-            prompt=prompt,
-            budget_tokens=400,
-            temperature=0.7
-        )
-        
-        # SET SOURCE STRUCTURALLY based on API call success
-        if success:
-            attribution_source = "model"
-            
-            # Parse model response to extract counterfactual judgment
-            model_response = response.content.lower()
-            if "would pass" in model_response or "fix" in model_response or "resolve" in model_response:
-                outcome = "pass"
-            elif "would fail" in model_response or "not fix" in model_response:
-                outcome = "fail"
-            else:
-                outcome = "inconclusive"
-            
-            result = CounterfactualResult(
-                cause=cause,
-                original_outcome="fail",
-                counterfactual_outcome=outcome,
-                details=response.content[:200]
-            )
+        test_ids = failing_test_ids(run.failure_logs)
+        result = self.sandbox.run_with_patch(run.repo, run.failing_commit, hunks_patch, reverse=True, test_ids=test_ids)
+        scope = f"{len(test_ids)} failing test(s)" if test_ids else "full suite (no test ids in logs)"
+        if not result.applied:
+            outcome = CounterfactualResult(
+                cause, "fail", "inconclusive",
+                f"Suspected-cause hunks did not reverse-apply: {result.apply_error}"
+            ), "not_executed"
+        elif result.tests.timed_out:
+            outcome = CounterfactualResult(cause, "fail", "inconclusive", f"Tests timed out ({scope})"), "execution"
         else:
-            attribution_source = "fallback_heuristic"
-            
-            # Fallback to conservative estimate - mark source and escalate
-            result = CounterfactualResult(
-                cause=cause,
-                original_outcome="fail",
-                counterfactual_outcome="inconclusive",
-                details="Model analysis failed - insufficient evidence to determine counterfactual outcome"
-            )
-        
-        self.counterfactual_cache[cache_key] = (result, attribution_source)
-        return (result, attribution_source)
+            verdict = "pass" if result.passed else "fail"
+            outcome = CounterfactualResult(
+                cause, "fail", verdict,
+                f"Reverted {selection_note}; ran {scope}; exit {result.tests.returncode}"
+            ), "execution"
+        self.counterfactual_cache[cache_key] = outcome
+        return outcome
     
     def attribute(self, run: Run) -> Attribution:
         """
@@ -390,9 +390,11 @@ List evidence that contradicts this cause (one per line, be specific):"""
         evidence_against, against_source = self._gather_evidence_against_cause(claimed_cause, diff, failure_logs)
         sources.append(against_source)
         
-        # Test counterfactual - returns (result, source)
-        counterfactual_result, counterfactual_source = self._test_counterfactual(claimed_cause, diff, run)
-        sources.append(counterfactual_source)
+        # Counterfactual: executed (revert suspected hunks, re-run failing tests).
+        # Not model reasoning, so it does not feed attribution_source.
+        counterfactual_result, _counterfactual_source = self._test_counterfactual(
+            claimed_cause, diff, run, evidence=evidence_for
+        )
         
         # Build alternatives
         alternatives = []
@@ -457,3 +459,88 @@ List evidence that contradicts this cause (one per line, be specific):"""
         step = self.create_attribution_step(run, attribution)
         run.add_step(step)
         return attribution
+
+
+# ---------------------------------------------------------------------------
+# Hunk selection for the executed counterfactual
+# ---------------------------------------------------------------------------
+
+_FILE_HDR_RE = re.compile(r"^--- (?:a/)?(\S+)")
+_NEW_HDR_RE = re.compile(r"^\+\+\+ (?:b/)?(\S+)")
+_CODE_IDENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+# Keywords and ubiquitous names say nothing about *which* hunk a cause refers to.
+_NOT_DISTINCTIVE = frozenset(keyword.kwlist) | {"self", "cls", "None", "True", "False", "print", "len", "str", "int"}
+
+
+def _split_diff(diff: str) -> List[Dict[str, Any]]:
+    """Unified diff -> [{'path', 'header': [lines], 'hunks': [[lines], ...]}]. Needs @@ headers."""
+    files: List[Dict[str, Any]] = []
+    current: Optional[Dict[str, Any]] = None
+    lines = (diff or "").splitlines()
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        if line.startswith("--- ") and i + 1 < len(lines) and lines[i + 1].startswith("+++ "):
+            old = _FILE_HDR_RE.match(line)
+            new = _NEW_HDR_RE.match(lines[i + 1])
+            path = (new.group(1) if new and new.group(1) != "/dev/null" else (old.group(1) if old else ""))
+            current = {'path': path, 'header': [line, lines[i + 1]], 'hunks': []}
+            files.append(current)
+            i += 2
+            continue
+        if line.startswith("@@") and current is not None:
+            current['hunks'].append([line])
+        elif current is not None and current['hunks'] and (line[:1] in (" ", "+", "-", "\\") or line == ""):
+            current['hunks'][-1].append(line)
+        i += 1
+    return [f for f in files if f['hunks']]
+
+
+def select_cause_hunks(cause: str, evidence: List[str], diff: str) -> Tuple[Optional[str], str]:
+    """
+    Pick the hunks of `diff` that implement `cause`, as a patch to reverse-apply.
+    
+    Deterministic, no model:
+      * a hunk is selected if its file path or basename is mentioned in the
+        cause/evidence, or if an identifier (>= 3 chars) from its changed
+        lines appears in the cause/evidence as a whole word;
+      * if nothing matches and the diff has exactly one hunk, that hunk is it;
+      * otherwise returns (None, reason): reverting the whole commit would only
+        show the *commit* is responsible, not this specific cause.
+    
+    Returns:
+        (patch_text or None, human-readable note on what was selected / why not)
+    """
+    files = _split_diff(diff)
+    total = sum(len(f['hunks']) for f in files)
+    if total == 0:
+        return None, "diff has no hunks with @@ headers to revert"
+    text = " ".join([cause or ""] + list(evidence or []))
+    words = set(re.findall(r"[A-Za-z_][A-Za-z0-9_]*", text))
+    
+    selected: List[Tuple[Dict[str, Any], List[str]]] = []
+    for f in files:
+        path = f['path']
+        base = path.rsplit("/", 1)[-1]
+        file_named = bool(path) and (path in text or base in text)
+        for hunk in f['hunks']:
+            changed = " ".join(l[1:] for l in hunk[1:] if l[:1] in "+-")
+            idents = {t for t in _CODE_IDENT_RE.findall(changed) if len(t) >= 3 and t not in _NOT_DISTINCTIVE}
+            if file_named or (idents & words):
+                selected.append((f, hunk))
+    if not selected and total == 1:
+        selected = [(files[0], files[0]['hunks'][0])]
+        note = "the diff's only hunk"
+    elif not selected:
+        return None, f"could not isolate the suspected cause to specific hunks ({total} hunks, none referenced)"
+    else:
+        note = f"{len(selected)} of {total} hunk(s) matching the suspected cause"
+    
+    out: List[str] = []
+    last_file = None
+    for f, hunk in selected:
+        if f is not last_file:
+            out.extend(f['header'])
+            last_file = f
+        out.extend(hunk)
+    return "\n".join(out) + "\n", note
