@@ -156,6 +156,29 @@ class BudgetGuard:
         
         return True, f"{layer.title()} retry recorded: {new_retries}/{max_retries} (total: {total_retries}/{budget['max_retries_total']})"
     
+    def can_retry(self, run_id: str, layer: str) -> bool:
+        """
+        Read-only check: would record_retry(run_id, layer) succeed right now?
+
+        Used by the v2 semantic retry loop to decide whether another context
+        bucket can be tried, without consuming a retry just to find out.
+
+        Args:
+            run_id: The Run ID
+            layer: 'mechanical', 'structural' or 'semantic'
+
+        Returns:
+            True if both the per-layer limit and the total ceiling have room
+        """
+        budget = self.run_budgets.get(run_id)
+        if budget is None or layer not in ('mechanical', 'structural', 'semantic'):
+            return False
+        total = budget['retries_used_mechanical'] + budget['retries_used_structural'] + budget['retries_used_semantic']
+        return (
+            budget[f'retries_used_{layer}'] < budget[f'max_retries_{layer}']
+            and total < budget['max_retries_total']
+        )
+
     def is_budget_exhausted(self, run_id: str) -> Tuple[bool, str]:
         """
         Check if a run's budget is exhausted.
