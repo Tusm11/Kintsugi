@@ -281,3 +281,31 @@ class TestActionLayer:
         ok, msg = layer.escalate(run_with_repair(repo, FIX_PATCH), "x")
         assert not ok and "http" not in msg
         assert layer.get_actions_taken()[0]["status"] == "not_posted"
+
+
+class TestReanchoring:
+    """Model patches without @@ line numbers (seen from gpt-oss in the tablib trial)."""
+
+    def test_bare_hunk_header_is_reanchored_and_verified(self, repo, sandbox):
+        bare = "--- a/calc.py\n+++ b/calc.py\n@@\n-    return 41\n+    return 42\n"
+        passed, reason, out = Verifier(sandbox=sandbox).verify(run_with_repair(repo, bare))
+        assert passed, reason
+        assert out["apply_note"].startswith("re-anchored")
+
+    def test_wrong_path_prefix_resolved_when_unique(self, repo, sandbox):
+        (repo["path"] / "pkg").mkdir()
+        bare = "--- a/lib/calc.py\n+++ b/lib/calc.py\n@@\n-    return 41\n+    return 42\n"
+        # "lib/calc.py" matches no tracked file: refused, not guessed
+        passed, reason, _ = Verifier(sandbox=sandbox).verify(run_with_repair(repo, bare))
+        assert not passed and "not found" in reason
+
+    def test_ambiguous_hunk_is_refused(self, repo, sandbox):
+        # A single blank line occurs twice in calc.py (lines 3 and 4): refused.
+        amb = "--- a/calc.py\n+++ b/calc.py\n@@\n \n+# x\n"
+        passed, reason, _ = Verifier(sandbox=sandbox).verify(run_with_repair(repo, amb))
+        assert not passed and "matches" in reason
+
+    def test_invented_code_is_refused(self, repo, sandbox):
+        bogus = "--- a/calc.py\n+++ b/calc.py\n@@\n     def length(self):\n-        return 1\n+        return 2\n"
+        passed, reason, _ = Verifier(sandbox=sandbox).verify(run_with_repair(repo, bogus))
+        assert not passed and "matches 0 places" in reason

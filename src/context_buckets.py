@@ -241,3 +241,53 @@ class ContextBucketBuilder:
             bucket.truncated = True
             bucket.dropped_sections.extend(t for t, _ in sections[i + 1:])
             return
+
+
+_HUNK_NEW_RE = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@", re.MULTILINE)
+_NEW_FILE_RE = re.compile(r"^\+\+\+ (?:b/)?(\S+)", re.MULTILINE)
+
+
+def checkout_code_context(sandbox, window: int = 25, max_chars: int = 8000) -> Callable[[Run], Optional[str]]:
+    """
+    A `code_context_provider` that reads the real code around each changed hunk.
+    
+    For every file in the Run's diff it reads the file at the failing commit
+    from the configured checkout (`RepoSandbox.show_file`) and returns the
+    lines around each hunk, with line numbers, so the model sees actual code
+    (and real line numbers for its @@ headers) instead of guessing names.
+    Returns None when the repo has no checkout or the diff has no hunks.
+    """
+    def provider(run: Run) -> Optional[str]:
+        if not getattr(sandbox, "is_configured", None) or not sandbox.is_configured(run.repo):
+            return None
+        blocks: List[str] = []
+        sections = re.split(r"(?=^--- )", run.diff or "", flags=re.MULTILINE)
+        for section in sections:
+            m = _NEW_FILE_RE.search(section)
+            if not m or m.group(1) == "/dev/null":
+                continue
+            path = m.group(1)
+            text = sandbox.show_file(run.repo, run.failing_commit, path)
+            if text is None:
+                continue
+            lines = text.splitlines()
+            ranges: List[Tuple[int, int]] = []
+            for h in _HUNK_NEW_RE.finditer(section):
+                start, count = int(h.group(1)), int(h.group(2) or 1)
+                ranges.append((max(1, start - window), min(len(lines), start + count + window)))
+            ranges.sort()
+            merged: List[Tuple[int, int]] = []
+            for a, b in ranges:
+                if merged and a <= merged[-1][1] + 1:
+                    merged[-1] = (merged[-1][0], max(merged[-1][1], b))
+                else:
+                    merged.append((a, b))
+            for a, b in merged:
+                body = "\n".join(f"{n:>5} | {lines[n - 1]}" for n in range(a, b + 1))
+                blocks.append(f"{path} (lines {a}-{b} at the failing commit)\n{body}")
+        if not blocks:
+            return None
+        out = "\n\n".join(blocks)
+        return out[:max_chars]
+    
+    return provider

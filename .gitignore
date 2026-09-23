@@ -60,3 +60,7 @@ logs/
 *.md
 !README.md
 !docs/**/*.md
+!eval/**/*.md
+
+# Trial scratch (tablib clone); results are kept
+eval/.work/

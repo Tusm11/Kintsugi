@@ -88,6 +88,8 @@ class Verifier:
 
         output = result.tests.to_dict()
         output['patch_applied'] = patch is not None
+        if result.apply_note:
+            output['apply_note'] = result.apply_note
         output['verified_commit'] = result.head_commit
         if result.tests.timed_out:
             return False, f"Tests timed out after {self.sandbox.timeout_seconds:.0f}s", output

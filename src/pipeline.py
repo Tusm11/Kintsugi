@@ -17,7 +17,7 @@ from src.action_layer import ActionLayer
 from src.audit_log import AuditLog
 from src.attribution_similarity import MatchTier
 from src.fix_cache import FixCache, CacheLookup
-from src.context_buckets import ContextBucketBuilder, bucket_tier_for_attempt
+from src.context_buckets import ContextBucketBuilder, bucket_tier_for_attempt, checkout_code_context
 from src.cache_metrics import CacheMetrics
 from src.sandbox import RepoSandbox
 from src.github_client import GitHubClient
@@ -76,18 +76,23 @@ class KintsugiPipeline:
         self.classifier = Classifier()
         # One sandbox (local checkout + test command) shared by every component that runs code.
         self.sandbox = sandbox or RepoSandbox()
-        self.attribution = AttributionEngine(sandbox=self.sandbox)
         self.router = RepairRouter()
         
-        # Load providers from environment if not provided (required - no fallback)
+        # Load providers from environment if not provided (required - no fallback).
+        # The env/API-key check applies only to providers built from the
+        # environment; explicitly passed providers carry their own config.
+        providers_from_env = semantic_provider is None or structural_provider is None
         if semantic_provider is None:
             semantic_provider = get_provider("semantic")
         
         if structural_provider is None:
             structural_provider = get_provider("structural")
         
-        # Validate providers have required configuration at startup
-        self._validate_provider_configuration()
+        # Diagnosis uses the same model as semantic repair.
+        self.attribution = AttributionEngine(sandbox=self.sandbox, model_provider=semantic_provider)
+        
+        if providers_from_env:
+            self._validate_provider_configuration()
         
         # Handlers with configured providers (required)
         self.mechanical_handler = MechanicalHandler()
@@ -118,7 +123,10 @@ class KintsugiPipeline:
         # Metrics are shared with the cache when there is one, so bucket usage and
         # cache hits land in the same counters/JSONL sink.
         self.cache_metrics = self.fix_cache.metrics if self.fix_cache else CacheMetrics()
-        self.context_builder = context_builder or ContextBucketBuilder()
+        # Bucket 2's "surrounding code": read from the configured checkout by default.
+        self.context_builder = context_builder or ContextBucketBuilder(
+            code_context_provider=checkout_code_context(self.sandbox)
+        )
 
     def _validate_provider_configuration(self):
         """Validate that configured providers have valid API keys at startup"""

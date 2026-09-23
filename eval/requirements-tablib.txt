@@ -1,0 +1,9 @@
+# Extra packages tablib's own test suite needs (installed into Kintsugi's venv; the
+# trial runs tablib's tests with the same interpreter).
+odfpy
+openpyxl>=2.6.0
+pyyaml
+tabulate
+xlrd
+xlwt
+pytest

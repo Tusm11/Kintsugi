@@ -37,14 +37,20 @@ class AttributionEngine:
     - The result of the counterfactual intervention
     """
     
-    def __init__(self, sandbox: Optional[RepoSandbox] = None):
+    def __init__(self, sandbox: Optional[RepoSandbox] = None, model_provider=None):
         """
         Initialize attribution engine.
         
         Args:
             sandbox: RepoSandbox used to execute counterfactuals (default: from env)
+            model_provider: ModelProvider for cause/evidence reasoning. The
+                pipeline passes its semantic provider so diagnosis and repair use
+                the same model. If None, one is built from SEMANTIC_PROVIDER on
+                each call (v1 behaviour).
         """
         self.sandbox = sandbox or RepoSandbox()
+        self.model_provider = model_provider
+        self.last_counterfactual_detail: Optional[str] = None
         self.counterfactual_cache: Dict[str, Tuple[CounterfactualResult, str]] = {}
     
     def _parse_diff_changes(self, diff: str) -> List[Dict[str, str]]:
@@ -124,7 +130,7 @@ class AttributionEngine:
         )
         
         # Call semantic model
-        provider = get_provider("semantic")
+        provider = self.model_provider or get_provider("semantic")
         success, response = provider.call_with_retry(
             prompt=prompt,
             budget_tokens=500,
@@ -136,15 +142,12 @@ class AttributionEngine:
             # Model call succeeded — this is real model reasoning
             attribution_source = "model"
             
-            # Parse model response - expect list of causes
-            causes = []
-            lines = response.content.split('\n')
-            for line in lines:
-                line = line.strip()
-                if line and not line.startswith('#'):
-                    causes.append(line)
-            
-            return (causes[:3] if causes else ["Model could not identify specific causes"], attribution_source)
+            # AttributionPrompt asks for ROOT_CAUSE / WHY_IT_FAILS / ALTERNATIVES /
+            # CONFIDENCE sections. The primary cause is the ROOT_CAUSE section;
+            # alternatives come from ALTERNATIVES. (v1 took the first three raw
+            # lines, so WHY_IT_FAILS and CONFIDENCE became "alternative causes".)
+            causes = parse_attribution_response(response.content)
+            return (causes if causes else ["Model could not identify specific causes"], attribution_source)
         else:
             # Model call failed — use fallback heuristics
             attribution_source = "fallback_heuristic"
@@ -181,7 +184,7 @@ class AttributionEngine:
         from src.model_provider import get_provider
         
         # Use semantic model to gather supporting evidence
-        provider = get_provider("semantic")
+        provider = self.model_provider or get_provider("semantic")
         
         prompt = f"""Given this suspected root cause, list evidence that supports it being the actual cause of the test failure.
 
@@ -197,7 +200,8 @@ class AttributionEngine:
 **Changed Files:**
 {', '.join(changed_files)}
 
-List supporting evidence for this cause (one per line, be specific):"""
+List supporting evidence for this cause, one item per line, no headings.
+If nothing supports it, reply with exactly: NONE"""
         
         success, response = provider.call_with_retry(
             prompt=prompt,
@@ -209,15 +213,9 @@ List supporting evidence for this cause (one per line, be specific):"""
         if success:
             attribution_source = "model"
             
-            # Parse model response into evidence list
-            evidence = []
-            lines = response.content.split('\n')
-            for line in lines:
-                line = line.strip()
-                if line and not line.startswith('#'):
-                    evidence.append(line)
-            
-            return (evidence[:5] if evidence else ["No supporting evidence found"], attribution_source)
+            # An empty list means "the model found none". Filler such as
+            # "No supporting evidence found" is never recorded as evidence.
+            return (parse_evidence_lines(response.content)[:5], attribution_source)
         else:
             attribution_source = "fallback_heuristic"
             
@@ -247,7 +245,7 @@ List supporting evidence for this cause (one per line, be specific):"""
         from src.model_provider import get_provider
         
         # Use semantic model to identify contradicting evidence
-        provider = get_provider("semantic")
+        provider = self.model_provider or get_provider("semantic")
         
         prompt = f"""Given this suspected root cause, what evidence suggests this is NOT the actual cause of the test failure?
 
@@ -260,7 +258,9 @@ List supporting evidence for this cause (one per line, be specific):"""
 **Failure Logs:**
 {failure_logs[:1000]}
 
-List evidence that contradicts this cause (one per line, be specific):"""
+List only concrete facts from the diff or logs that contradict this cause, one per
+line, no headings. Do not list speculative alternatives or general caveats.
+If nothing in the diff or logs contradicts it, reply with exactly: NONE"""
         
         success, response = provider.call_with_retry(
             prompt=prompt,
@@ -272,15 +272,11 @@ List evidence that contradicts this cause (one per line, be specific):"""
         if success:
             attribution_source = "model"
             
-            # Parse model response
-            evidence = []
-            lines = response.content.split('\n')
-            for line in lines:
-                line = line.strip()
-                if line and not line.startswith('#'):
-                    evidence.append(line)
-            
-            return (evidence[:5] if evidence else ["No contradicting evidence found"], attribution_source)
+            # AX-VERIFIED: a model reply of "NONE", blank lines, headings or filler
+            # ("No contradicting evidence found") yields an EMPTY evidence_against,
+            # so the Confidence Gate is not blocked by text that isn't evidence.
+            # (tests/test_attribution_parsing.py::TestEvidenceParsing)
+            return (parse_evidence_lines(response.content)[:5], attribution_source)
         else:
             attribution_source = "fallback_heuristic"
             
@@ -395,6 +391,8 @@ List evidence that contradicts this cause (one per line, be specific):"""
         counterfactual_result, _counterfactual_source = self._test_counterfactual(
             claimed_cause, diff, run, evidence=evidence_for
         )
+        # What was actually reverted/run (or why nothing was), for reports and audits.
+        self.last_counterfactual_detail = counterfactual_result.details
         
         # Build alternatives
         alternatives = []
@@ -544,3 +542,69 @@ def select_cause_hunks(cause: str, evidence: List[str], diff: str) -> Tuple[Opti
             last_file = f
         out.extend(hunk)
     return "\n".join(out) + "\n", note
+
+
+# ---------------------------------------------------------------------------
+# Model response parsing
+# ---------------------------------------------------------------------------
+
+_BULLET_RE = re.compile(r"^\s*(?:[-*\u2022]+|\d+[.)]|\(\w\))\s*")
+# Whole-line "there is nothing" replies only. A substantive line that merely
+# starts with "No evidence that ..." is real evidence and is kept.
+_NONE_RE = re.compile(
+    r"^(?:none|n/?a|nothing|not applicable|none of (?:these|the above)(?: apply)?"
+    r"|no (?:supporting |contradicting |counter[- ]?)?evidence(?: (?:was |is )?found)?"
+    r"|there is no (?:supporting |contradicting |counter[- ]?)?evidence"
+    r"|nothing (?:in the diff or logs )?contradicts (?:it|this|this cause))[.!]?$",
+    re.IGNORECASE,
+)
+_SECTION_RE = re.compile(r"^\s*(ROOT_CAUSE|WHY_IT_FAILS|ALTERNATIVES|CONFIDENCE)\s*:\s*(.*)$", re.IGNORECASE)
+
+
+def parse_evidence_lines(content: str) -> List[str]:
+    """
+    Turn a model's "one item per line" reply into evidence items.
+    
+    Drops: blank lines, markdown headings, lines that are only a heading ending
+    in ':', and anything that says there is no evidence (NONE, "No
+    contradicting evidence found", "None of the above", ...). Strips bullets and
+    numbering. An empty result means the model reported no evidence.
+    """
+    items: List[str] = []
+    for raw in (content or "").splitlines():
+        line = raw.strip().strip("*").strip()
+        if not line or line.startswith("#"):
+            continue
+        line = _BULLET_RE.sub("", line).strip().strip("*").strip()
+        if not line or line.endswith(":"):
+            continue
+        if _NONE_RE.match(line):
+            continue
+        items.append(line)
+    return items
+
+
+def parse_attribution_response(content: str) -> List[str]:
+    """
+    [primary cause, alternative, alternative] from an AttributionPrompt reply.
+    
+    Uses the ROOT_CAUSE section as the primary cause and ALTERNATIVES section
+    items as alternatives. If the model ignored the format, falls back to the
+    first non-empty lines (v1 behaviour).
+    """
+    sections: Dict[str, List[str]] = {}
+    current: Optional[str] = None
+    for raw in (content or "").splitlines():
+        m = _SECTION_RE.match(raw)
+        if m:
+            current = m.group(1).upper()
+            sections.setdefault(current, [])
+            if m.group(2).strip():
+                sections[current].append(m.group(2).strip())
+        elif current and raw.strip():
+            sections[current].append(raw.strip())
+    if sections.get("ROOT_CAUSE"):
+        primary = " ".join(sections["ROOT_CAUSE"]).strip()
+        alternatives = [a for a in parse_evidence_lines("\n".join(sections.get("ALTERNATIVES", [])))]
+        return [primary] + alternatives[:2]
+    return [l for l in parse_evidence_lines(content)][:3]

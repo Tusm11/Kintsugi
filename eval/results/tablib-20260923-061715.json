@@ -1,0 +1,1708 @@
+{
+  "generated_at": "20260923-061715",
+  "model": "groq / openai/gpt-oss-20b",
+  "tablib_base": "a36c9654742d0cf07675a79df10581b3e1344555",
+  "stub": false,
+  "results": [
+    {
+      "pass": 1,
+      "scenario": "height_off_by_one",
+      "title": "Dataset.height reports one row too few",
+      "expected_layer": "semantic",
+      "final_status": "escalated",
+      "summary": "Classification: semantic \u2192 Attribution: The `Dataset.row_count` property was mistakenly altered to return `len(self._data) - 1` instead of the correct `len(self._data)`. \u2192 Handler: semantic \u2192 Repair: Success (bucket 1) \u2192 Failed Confidence gate",
+      "seconds": 10.4,
+      "model_calls": 4,
+      "model_failed_calls": 0,
+      "model_tokens": 5828,
+      "classified_as": "semantic",
+      "attribution": {
+        "claimed_cause": "The `Dataset.row_count` property was mistakenly altered to return `len(self._data) - 1` instead of the correct `len(self._data)`.",
+        "counterfactual": "pass",
+        "source": "model",
+        "evidence_for": [
+          "The failure shows a permutation of rows where the first row of data appears as the last row in the output, suggesting that the dataset is being iterated with one fewer row than actually present.",
+          "The `row_count` property is used by the ReST format exporter to determine how many rows to render; returning `len(self._data) - 1` would cause the exporter to skip the last data row and treat the header row as part of the data, producing the observed ordering shift.",
+          "The diff explicitly changes the return value from `len(self._data)` to `len(self._data) - 1`, directly altering the row count calculation that feeds into the export logic.",
+          "The test failure logs indicate that the dataset contains four rows of data, but the output shows only three data rows in the expected order plus an extra row that appears to be the header, consistent with an off\u2011by\u2011one row count.",
+          "The ReST format's `export_set` method relies on `dataset.row_count` to loop over rows; an incorrect count would misalign the data rows with the column headers, matching the pattern seen in the failure output."
+        ],
+        "evidence_against": [
+          "Output includes all four rows; none are omitted.",
+          "The exported table shows every row that should be present, so a decrement of the row count would have removed a row, which did not happen.",
+          "The failure is due to row ordering, not to a reduced row count."
+        ],
+        "from_cache": false
+      },
+      "repairs": [
+        {
+          "layer": "semantic",
+          "ok": true,
+          "source": "generation",
+          "bucket": 1,
+          "action": null,
+          "patch": "--- a/tablib/dataset.py\n+++ b/tablib/dataset.py\n@@\n     @property\n     def row_count(self):\n-        \"\"\"Returns the number of data rows.\"\"\"\n-        return len(self._data) - 1\n+        \"\"\"Returns the number of data rows.\"\"\"\n+        # The dataset stores its data in ``self._data`` as a list of rows,\n+        # with the first row being the header (if present).  The original\n+        # implementation incorrectly returned ``len(self._data) - 1``, which\n+        # omitted the last row of data from all calculations that rely on\n+        # ``row_count``.  This caused the exporter and other methods to\n+        # mis\u2011align rows and headers.  The correct value is the full length\n+        # of ``self._data``.\n+        return len(self._data)",
+          "description": "ROOT_CAUSE: The `row_count` property mistakenly subtracted one from the actual number of data rows, causing off\u2011by\u2011one errors in table rendering and other dataset operations.  \nPROPOSED_FIX:\n```diff\n-"
+        }
+      ],
+      "confidence_gate": {
+        "eligible": false,
+        "reason": "Evidence contradicts fix: Output includes all four rows; none are omitted.; The exported table shows every row that should be present, so a decrement of the row count would have removed a row, which did not happen."
+      },
+      "scope_guard": {
+        "in_scope": true,
+        "reason": "Patch is within safe scope"
+      },
+      "dry_run_escalation_issue": "Kintsugi escalation: e2a22d5c",
+      "guardrails": [
+        {
+          "name": "rate_guard",
+          "passed": true,
+          "reason": "Event recorded (1/10000)"
+        },
+        {
+          "name": "input_guardrail",
+          "passed": true,
+          "reason": "Content safe"
+        },
+        {
+          "name": "confidence_gate",
+          "passed": false,
+          "reason": "Evidence contradicts fix: Output includes all four rows; none are omitted.; The exported table shows every row that should be present, so a decrement of the row count would have removed a row, which did not happen."
+        },
+        {
+          "name": "scope_guard",
+          "passed": true,
+          "reason": "Patch is within safe scope"
+        }
+      ],
+      "counterfactual_detail": "Reverted 1 of 1 hunk(s) matching the suspected cause; ran 54 failing test(s); exit 0"
+    },
+    {
+      "pass": 1,
+      "scenario": "width_off_by_one",
+      "title": "Dataset.width reports one column too many",
+      "expected_layer": "semantic",
+      "final_status": "healed",
+      "summary": "PR opened: dry-run://jazzband/tablib/pull/6",
+      "seconds": 43.3,
+      "model_calls": 5,
+      "model_failed_calls": 0,
+      "model_tokens": 8044,
+      "classified_as": "semantic",
+      "attribution": {
+        "claimed_cause": "The change in `Dataset._column_count` added `+ 1` to the length of the first row, causing the reported number of columns to be one greater than the actual data width.",
+        "counterfactual": "pass",
+        "source": "model",
+        "evidence_for": [
+          "The diff shows the change to `Dataset._column_count` adding `+ 1` to the length of the first row, directly altering the reported column count.",
+          "The failures occur in CSV, TSV, and ODS export/import tests, all of which rely on the dataset\u2019s column count to validate row lengths and header alignment.",
+          "The exception types (`tablib.exceptions.InvalidDataError`) are raised when the number of columns reported by the dataset does not match the actual data, a scenario that would be triggered by an inflated column count.",
+          "The tests that fail involve operations that compare the dataset\u2019s column count to the length of each row (e.g., `test_tsv_import_set`, `test_ods_import_set_ragged`), indicating that an incorrect column count would cause these validations to fail.",
+          "The failure logs show that the same exception is raised across multiple formats, suggesting a common underlying issue in the dataset\u2019s column handling rather than format\u2011specific bugs."
+        ],
+        "evidence_against": [],
+        "from_cache": false
+      },
+      "repairs": [
+        {
+          "layer": "semantic",
+          "ok": true,
+          "source": "generation",
+          "bucket": 1,
+          "action": null,
+          "patch": "--- a/tablib/dataset.py\n+++ b/tablib/dataset.py\n@@\n-    @property\n-    def _column_count(self):\n-        \"\"\"Return the number of columns in the dataset.\"\"\"\n-        # The original implementation added 1 to the length of the first row,\n-        # which incorrectly reported one extra column.\n-        return len(self._rows[0]) + 1 if self._rows else 0\n+    @property\n+    def _column_count(self):\n+        \"\"\"Return the number of columns in the dataset.\"\"\"\n+        # The column count should be the actual width of the first row.\n+        # Adding 1 caused an off\u2011by\u2011one error that broke many import/export\n+        # routines that validate row lengths against this value.\n+        return len(self._rows[0]) if self._rows else 0",
+          "description": "ROOT_CAUSE: The dataset\u2019s `_column_count` property incorrectly added 1 to the length of the first row, inflating the reported column count and causing validation errors across CSV, TSV, ODS, XLS and X"
+        },
+        {
+          "layer": "semantic",
+          "ok": true,
+          "source": "generation",
+          "bucket": 2,
+          "action": null,
+          "patch": "--- a/src/tablib/core.py\n+++ b/src/tablib/core.py\n@@\n-        try:\n-            return len(self._data[0]) + 1\n-        except IndexError:\n-            try:\n-                return len(self.headers)\n-            except TypeError:\n-                return 0\n+        try:\n+            return len(self._data[0])\n+        except IndexError:\n+            try:\n+                return len(self.headers)\n+            except TypeError:\n+                return 0",
+          "description": "ROOT_CAUSE: The `width` property incorrectly added 1 to the actual number of columns, causing dataset column counts to be inflated and breaking CSV/TSV/ODS/XLSX import/export validations.  \nPROPOSED_F"
+        }
+      ],
+      "confidence_gate": {
+        "eligible": true,
+        "reason": "All evidence criteria met for auto-apply (model-sourced attribution)"
+      },
+      "scope_guard": {
+        "in_scope": true,
+        "reason": "Patch is within safe scope"
+      },
+      "verifications": [
+        {
+          "passed": false,
+          "reason": "Patch did not apply: error: No valid patches in input (allow with \"--allow-empty\"); could not re-anchor: path 'tablib/dataset.py' not found (0 candidates)",
+          "tests_passed": null,
+          "tests_failed": null
+        },
+        {
+          "passed": true,
+          "reason": "All tests passed",
+          "tests_passed": 183,
+          "tests_failed": 0
+        }
+      ],
+      "dry_run_pr": {
+        "title": "Kintsugi: fix for failing commit 0a40550c",
+        "base": "master",
+        "files": [
+          "src/tablib/core.py"
+        ]
+      },
+      "guardrails": [
+        {
+          "name": "rate_guard",
+          "passed": true,
+          "reason": "Event recorded (2/10000)"
+        },
+        {
+          "name": "input_guardrail",
+          "passed": true,
+          "reason": "Content safe"
+        },
+        {
+          "name": "confidence_gate",
+          "passed": true,
+          "reason": "All evidence criteria met for auto-apply (model-sourced attribution)"
+        },
+        {
+          "name": "scope_guard",
+          "passed": true,
+          "reason": "Patch is within safe scope"
+        },
+        {
+          "name": "confidence_gate",
+          "passed": true,
+          "reason": "All evidence criteria met for auto-apply (model-sourced attribution)"
+        },
+        {
+          "name": "scope_guard",
+          "passed": true,
+          "reason": "Patch is within safe scope"
+        }
+      ],
+      "counterfactual_detail": "Reverted the diff's only hunk; ran 72 failing test(s); exit 0"
+    },
+    {
+      "pass": 1,
+      "scenario": "sort_reverse_inverted",
+      "title": "Dataset.sort(col_name) ignores/inverts reverse=",
+      "expected_layer": "semantic",
+      "final_status": "healed",
+      "summary": "PR opened: dry-run://jazzband/tablib/pull/6",
+      "seconds": 38.6,
+      "model_calls": 5,
+      "model_failed_calls": 0,
+      "model_tokens": 5130,
+      "classified_as": "semantic",
+      "attribution": {
+        "claimed_cause": "The `reverse` flag was inverted in the sorting logic. The line changed from ```python _sorted = sorted(self.dict, key=itemgetter(col), reverse=reverse) ``` to ```python _sorted = sorted(self.dict, key=itemgetter(col), reverse=not reverse) ``` so when `reverse=False` (default ascending) the code now sorts **descending**.",
+        "counterfactual": "pass",
+        "source": "model",
+        "evidence_for": [
+          "The failure message shows that the first row after sorting is `'Thomas', 'Jefferson', 50` instead of the expected `'George', 'Washington', 67`, indicating the sort order is opposite of what the test expects.",
+          "The diff shows that the `reverse` argument passed to `sorted()` was inverted from `reverse=reverse` to `reverse=not reverse`, meaning the default ascending sort (`reverse=False`) now becomes descending.",
+          "The test `test_sorting` expects the dataset to be sorted in ascending order by default, which aligns with the original code but conflicts with the modified code that now sorts descending.",
+          "The `sorted` call uses `key=itemgetter(col)` correctly, so the only change affecting order is the `reverse` flag, directly pointing to the inversion as the root cause.",
+          "No other parts of the code or tests indicate a change in sorting logic, so the inversion is the sole plausible explanation for the observed failure."
+        ],
+        "evidence_against": [],
+        "from_cache": false
+      },
+      "repairs": [
+        {
+          "layer": "semantic",
+          "ok": true,
+          "source": "generation",
+          "bucket": 1,
+          "action": null,
+          "patch": "--- a/tablib/dataset.py\n+++ b/tablib/dataset.py\n@@\n-        _sorted = sorted(self.dict, key=itemgetter(col), reverse=not reverse)\n+        # Use the `reverse` flag as intended: when `reverse=True` we want\n+        # descending order, otherwise ascending. The previous code inverted\n+        # the flag, leading to opposite sorting behavior.\n+        _sorted = sorted(self.dict, key=itemgetter(col), reverse=reverse)",
+          "description": "ROOT_CAUSE: The sorting logic inverted the `reverse` flag, causing ascending sorts to become descending.\n\nPROPOSED_FIX:\n```diff\n--- a/tablib/dataset.py\n+++ b/tablib/dataset.py\n@@\n-        _sorted = so"
+        },
+        {
+          "layer": "semantic",
+          "ok": true,
+          "source": "generation",
+          "bucket": 2,
+          "action": null,
+          "patch": "--- a/src/tablib/core.py\n+++ b/src/tablib/core.py\n@@\n-            _sorted = sorted(self.dict, key=itemgetter(col), reverse=not reverse)\n+            _sorted = sorted(self.dict, key=itemgetter(col), reverse=reverse)",
+          "description": "ROOT_CAUSE: The `sort` method inverted the `reverse` flag when sorting by a string column, causing ascending sorts to become descending.\n\nPROPOSED_FIX:\n```diff\n--- a/src/tablib/core.py\n+++ b/src/tabli"
+        }
+      ],
+      "confidence_gate": {
+        "eligible": true,
+        "reason": "All evidence criteria met for auto-apply (model-sourced attribution)"
+      },
+      "scope_guard": {
+        "in_scope": true,
+        "reason": "Patch is within safe scope"
+      },
+      "verifications": [
+        {
+          "passed": false,
+          "reason": "Patch did not apply: error: No valid patches in input (allow with \"--allow-empty\"); could not re-anchor: path 'tablib/dataset.py' not found (0 candidates)",
+          "tests_passed": null,
+          "tests_failed": null
+        },
+        {
+          "passed": true,
+          "reason": "All tests passed",
+          "tests_passed": 183,
+          "tests_failed": 0
+        }
+      ],
+      "dry_run_pr": {
+        "title": "Kintsugi: fix for failing commit b97da89d",
+        "base": "master",
+        "files": [
+          "src/tablib/core.py"
+        ]
+      },
+      "guardrails": [
+        {
+          "name": "rate_guard",
+          "passed": true,
+          "reason": "Event recorded (3/10000)"
+        },
+        {
+          "name": "input_guardrail",
+          "passed": true,
+          "reason": "Content safe"
+        },
+        {
+          "name": "confidence_gate",
+          "passed": true,
+          "reason": "All evidence criteria met for auto-apply (model-sourced attribution)"
+        },
+        {
+          "name": "scope_guard",
+          "passed": true,
+          "reason": "Patch is within safe scope"
+        },
+        {
+          "name": "confidence_gate",
+          "passed": true,
+          "reason": "All evidence criteria met for auto-apply (model-sourced attribution)"
+        },
+        {
+          "name": "scope_guard",
+          "passed": true,
+          "reason": "Patch is within safe scope"
+        }
+      ],
+      "counterfactual_detail": "Reverted 1 of 1 hunk(s) matching the suspected cause; ran 1 failing test(s); exit 0"
+    },
+    {
+      "pass": 1,
+      "scenario": "transpose_branch_swapped",
+      "title": "transpose() picks the wrong code path for headers",
+      "expected_layer": "semantic",
+      "final_status": "healed",
+      "summary": "PR opened: dry-run://jazzband/tablib/pull/6",
+      "seconds": 49.3,
+      "model_calls": 5,
+      "model_failed_calls": 0,
+      "model_tokens": 6237,
+      "classified_as": "semantic",
+      "attribution": {
+        "claimed_cause": "The condition that selects the transpose implementation was inverted. In `Dataset.transpose()` the original logic was: ```python if self.headers is None: return self._transpose_without_headers() else: return self._transpose_with_headers() ``` The patch changed it to: ```python if self.headers is not None: return self._transpose_without_headers() else: return self._transpose_with_headers() ``` Thus when `self.headers` is `None`, the code now incorrectly calls `_transpose_with_headers`, which expects headers to exist and fails.",
+        "counterfactual": "pass",
+        "source": "model",
+        "evidence_for": [
+          "The failure log shows a `TypeError` in `_transpose_with_headers` where it accesses `self.headers[0]`, implying `self.headers` is `None` at that point.",
+          "The test `test_transpose_multiple_headers` calls `data.transpose()` on a dataset with no headers, expecting `_transpose_without_headers()` to be used, but the stack trace shows `_transpose_with_headers()` was called instead.",
+          "The diff shows the condition was inverted: `if self.headers is not None:` now triggers `_transpose_without_headers()`, causing the wrong branch to execute when `self.headers` is `None`.",
+          "The `test_transpose` failure shows that `transposed_founders.headers` is `None` after transpose, whereas it should contain the original headers, indicating the transpose logic did not preserve headers correctly.",
+          "The original logic `if self.headers is None: return self._transpose_without_headers()` correctly selected the header\u2011less transpose, whereas the patched logic mistakenly selects the header\u2011aware branch when `self.headers` is `None`."
+        ],
+        "evidence_against": [],
+        "from_cache": false
+      },
+      "repairs": [
+        {
+          "layer": "semantic",
+          "ok": true,
+          "source": "generation",
+          "bucket": 1,
+          "action": null,
+          "patch": "--- a/src/tablib/core.py\n+++ b/src/tablib/core.py\n@@\n-    def transpose(self):\n-        if self.headers is not None:\n-            return self._transpose_without_headers()\n-        else:\n-            return self._transpose_with_headers()\n+    def transpose(self):\n+        # Correctly choose the transpose implementation based on the presence\n+        # of headers. When headers are absent (`None`), use the header\u2011less\n+        # transpose; otherwise, preserve the headers.\n+        if self.headers is None:\n+            return self._transpose_without_headers()\n+        else:\n+            return self._transpose_with_headers()",
+          "description": "ROOT_CAUSE: The transpose method incorrectly selected the header\u2011aware transpose when `self.headers` was `None`, causing a `TypeError` and incorrect header handling.\n\nPROPOSED_FIX:\n```diff\n--- a/src/t"
+        },
+        {
+          "layer": "semantic",
+          "ok": true,
+          "source": "generation",
+          "bucket": 2,
+          "action": null,
+          "patch": "--- a/src/tablib/core.py\n+++ b/src/tablib/core.py\n@@\n-        if self.headers is not None:\n-            return self._transpose_without_headers()\n-        else:\n-            return self._transpose_with_headers()\n+        # If the dataset has no headers, use the header\u2011less transpose.\n+        if self.headers is None:\n+            return self._transpose_without_headers()\n+        else:\n+            return self._transpose_with_headers()",
+          "description": "ROOT_CAUSE: The transpose logic mistakenly inverted the header check, causing header\u2011aware transposition to run when headers were missing and vice versa.  \nPROPOSED_FIX:\n```diff\n--- a/src/tablib/core."
+        }
+      ],
+      "confidence_gate": {
+        "eligible": true,
+        "reason": "All evidence criteria met for auto-apply (model-sourced attribution)"
+      },
+      "scope_guard": {
+        "in_scope": true,
+        "reason": "Patch is within safe scope"
+      },
+      "verifications": [
+        {
+          "passed": false,
+          "reason": "Patch did not apply: error: No valid patches in input (allow with \"--allow-empty\"); could not re-anchor: hunk in src/tablib/core.py matches 0 places",
+          "tests_passed": null,
+          "tests_failed": null
+        },
+        {
+          "passed": true,
+          "reason": "All tests passed",
+          "tests_passed": 183,
+          "tests_failed": 0
+        }
+      ],
+      "dry_run_pr": {
+        "title": "Kintsugi: fix for failing commit 183bbfc5",
+        "base": "master",
+        "files": [
+          "src/tablib/core.py"
+        ]
+      },
+      "guardrails": [
+        {
+          "name": "rate_guard",
+          "passed": true,
+          "reason": "Event recorded (2/10000)"
+        },
+        {
+          "name": "input_guardrail",
+          "passed": true,
+          "reason": "Content safe"
+        },
+        {
+          "name": "confidence_gate",
+          "passed": true,
+          "reason": "All evidence criteria met for auto-apply (model-sourced attribution)"
+        },
+        {
+          "name": "scope_guard",
+          "passed": true,
+          "reason": "Patch is within safe scope"
+        },
+        {
+          "name": "confidence_gate",
+          "passed": true,
+          "reason": "All evidence criteria met for auto-apply (model-sourced attribution)"
+        },
+        {
+          "name": "scope_guard",
+          "passed": true,
+          "reason": "Patch is within safe scope"
+        }
+      ],
+      "counterfactual_detail": "Reverted 1 of 1 hunk(s) matching the suspected cause; ran 3 failing test(s); exit 0"
+    },
+    {
+      "pass": 1,
+      "scenario": "remove_duplicates_noop",
+      "title": "remove_duplicates() keeps duplicates",
+      "expected_layer": "semantic",
+      "final_status": "healed",
+      "summary": "PR opened: dry-run://jazzband/tablib/pull/6",
+      "seconds": 39.0,
+      "model_calls": 5,
+      "model_failed_calls": 0,
+      "model_tokens": 5224,
+      "classified_as": "semantic",
+      "attribution": {
+        "claimed_cause": "The change in `remove_duplicates` replaced the logical **`or`** with **`and`** in the list\u2011comprehension condition. The original logic was: ```python row for row in self._data if not (tuple(row) in seen or seen.add(tuple(row))) ``` which keeps a row only when it has not been seen before. The new logic: ```python row for row in self._data if not (tuple(row) in seen and seen.add(tuple(row))) ``` uses `and` instead of `or`, causing the condition to evaluate to `True` for every row, so no duplicates are removed.",
+        "counterfactual": "pass",
+        "source": "model",
+        "evidence_for": [
+          "The failure shows that `self.founders.height` remains 6 instead of the expected 3, indicating duplicates were not removed.",
+          "The diff shows the list\u2011comprehension condition changed from `or` to `and`.",
+          "The original logic `if not (tuple(row) in seen or seen.add(tuple(row)))` correctly skips rows that are already in `seen`.",
+          "Replacing `or` with `and` makes the condition `if not (tuple(row) in seen and seen.add(tuple(row)))` always evaluate to `False` for new rows, because `seen.add` returns `None`, so the `and` short\u2011circuits and the whole expression becomes `False`. Thus the `not` makes it `True` for all rows, keeping every row.",
+          "The test expects the dataset to shrink to 3 unique rows, but the dataset remains at 6, matching the behavior of the buggy `and` logic."
+        ],
+        "evidence_against": [],
+        "from_cache": false
+      },
+      "repairs": [
+        {
+          "layer": "semantic",
+          "ok": true,
+          "source": "generation",
+          "bucket": 1,
+          "action": null,
+          "patch": "--- a/tablib/table.py\n+++ b/tablib/table.py\n@@\n-    def remove_duplicates(self):\n-        seen = set()\n-        self._data = [row for row in self._data if not (tuple(row) in seen and seen.add(tuple(row)))]\n+    def remove_duplicates(self):\n+        \"\"\"\n+        Remove duplicate rows from the table, preserving the original order.\n+\n+        The original implementation mistakenly used ``and`` in the condition,\n+        which prevented any rows from being removed. The correct logic uses\n+        ``or`` to ensure that a row is only kept if it has not been seen before.\n+        \"\"\"\n+        seen = set()\n+        self._data = [row for row in self._data if not (tuple(row) in seen or seen.add(tuple(row)))]",
+          "description": "ROOT_CAUSE: The `remove_duplicates` method mistakenly used `and` instead of `or` in the list\u2011comprehension condition, causing all rows to be retained.  \n\nPROPOSED_FIX:\n```diff\n--- a/tablib/table.py\n++"
+        },
+        {
+          "layer": "semantic",
+          "ok": true,
+          "source": "generation",
+          "bucket": 2,
+          "action": null,
+          "patch": "--- a/src/tablib/core.py\n+++ b/src/tablib/core.py\n@@\n-        self._data[:] = [\n-            row for row in self._data if not (tuple(row) in seen and seen.add(tuple(row)))\n-        ]\n+        self._data[:] = [\n+            row for row in self._data if not (tuple(row) in seen or seen.add(tuple(row)))\n+        ]",
+          "description": "ROOT_CAUSE: The `remove_duplicates` method mistakenly used `and` instead of `or`, causing all rows to be retained and duplicates not removed.  \nPROPOSED_FIX:\n```diff\n--- a/src/tablib/core.py\n+++ b/src"
+        }
+      ],
+      "confidence_gate": {
+        "eligible": true,
+        "reason": "All evidence criteria met for auto-apply (model-sourced attribution)"
+      },
+      "scope_guard": {
+        "in_scope": true,
+        "reason": "Patch is within safe scope"
+      },
+      "verifications": [
+        {
+          "passed": false,
+          "reason": "Patch did not apply: error: No valid patches in input (allow with \"--allow-empty\"); could not re-anchor: path 'tablib/table.py' not found (0 candidates)",
+          "tests_passed": null,
+          "tests_failed": null
+        },
+        {
+          "passed": true,
+          "reason": "All tests passed",
+          "tests_passed": 183,
+          "tests_failed": 0
+        }
+      ],
+      "dry_run_pr": {
+        "title": "Kintsugi: fix for failing commit 21579dc8",
+        "base": "master",
+        "files": [
+          "src/tablib/core.py"
+        ]
+      },
+      "guardrails": [
+        {
+          "name": "rate_guard",
+          "passed": true,
+          "reason": "Event recorded (2/10000)"
+        },
+        {
+          "name": "input_guardrail",
+          "passed": true,
+          "reason": "Content safe"
+        },
+        {
+          "name": "confidence_gate",
+          "passed": true,
+          "reason": "All evidence criteria met for auto-apply (model-sourced attribution)"
+        },
+        {
+          "name": "scope_guard",
+          "passed": true,
+          "reason": "Patch is within safe scope"
+        },
+        {
+          "name": "confidence_gate",
+          "passed": true,
+          "reason": "All evidence criteria met for auto-apply (model-sourced attribution)"
+        },
+        {
+          "name": "scope_guard",
+          "passed": true,
+          "reason": "Patch is within safe scope"
+        }
+      ],
+      "counterfactual_detail": "Reverted 1 of 1 hunk(s) matching the suspected cause; ran 1 failing test(s); exit 0"
+    },
+    {
+      "pass": 1,
+      "scenario": "row_lpush_appends",
+      "title": "Row.lpush() inserts at the end instead of the front",
+      "expected_layer": "semantic",
+      "final_status": "healed",
+      "summary": "PR opened: dry-run://jazzband/tablib/pull/6",
+      "seconds": 35.5,
+      "model_calls": 5,
+      "model_failed_calls": 0,
+      "model_tokens": 4885,
+      "classified_as": "semantic",
+      "attribution": {
+        "claimed_cause": "The `lpush` method was mistakenly changed to insert at the end of the row (`self.insert(len(self._row), value)`) instead of at the beginning (`self.insert(0, value)`).",
+        "counterfactual": "pass",
+        "source": "model",
+        "evidence_for": [
+          "test_row_lpush expected the new value to appear at index\u202f0, but the actual list was [John, Adams, 90, 53] \u2013 the value was appended instead of prepended",
+          "the diff shows the lpush method was changed from `self.insert(0, value)` to `self.insert(len(self._row), value)`",
+          "the original implementation of lpush in the library\u2019s documentation and earlier tests prepends the value to the row, not appends it."
+        ],
+        "evidence_against": [],
+        "from_cache": false
+      },
+      "repairs": [
+        {
+          "layer": "semantic",
+          "ok": true,
+          "source": "generation",
+          "bucket": 1,
+          "action": null,
+          "patch": "--- a/tablib/row.py\n+++ b/tablib/row.py\n@@\n-    def lpush(self, value):\n-        \"\"\"Insert a value at the beginning of the row.\"\"\"\n-        self.insert(len(self._row), value)\n+    def lpush(self, value):\n+        \"\"\"Insert a value at the beginning of the row.\"\"\"\n+        # Prepend the new value by inserting at index 0.\n+        self.insert(0, value)",
+          "description": "ROOT_CAUSE: The `lpush` method was incorrectly implemented to append the new value to the end of the row instead of inserting it at the beginning, causing the test to fail.\n\nPROPOSED_FIX:\n```diff\n--- "
+        },
+        {
+          "layer": "semantic",
+          "ok": true,
+          "source": "generation",
+          "bucket": 2,
+          "action": null,
+          "patch": "--- a/src/tablib/core.py\n+++ b/src/tablib/core.py\n@@\n     def rpush(self, value):\n         self.insert(len(self._row), value)\n \n     def lpush(self, value):\n-        self.insert(len(self._row), value)\n+        self.insert(0, value)\n \n     def append(self, value):\n         self.rpush(value)",
+          "description": "ROOT_CAUSE: The `lpush` method was mistakenly changed to append to the end of the row instead of inserting at the beginning, causing values to appear in the wrong order.\n\nPROPOSED_FIX:\n```diff\n--- a/s"
+        }
+      ],
+      "confidence_gate": {
+        "eligible": true,
+        "reason": "All evidence criteria met for auto-apply (model-sourced attribution)"
+      },
+      "scope_guard": {
+        "in_scope": true,
+        "reason": "Patch is within safe scope"
+      },
+      "verifications": [
+        {
+          "passed": false,
+          "reason": "Patch did not apply: error: No valid patches in input (allow with \"--allow-empty\"); could not re-anchor: path 'tablib/row.py' not found (0 candidates)",
+          "tests_passed": null,
+          "tests_failed": null
+        },
+        {
+          "passed": true,
+          "reason": "All tests passed",
+          "tests_passed": 183,
+          "tests_failed": 0
+        }
+      ],
+      "dry_run_pr": {
+        "title": "Kintsugi: fix for failing commit fbfe063e",
+        "base": "master",
+        "files": [
+          "src/tablib/core.py"
+        ]
+      },
+      "guardrails": [
+        {
+          "name": "rate_guard",
+          "passed": true,
+          "reason": "Event recorded (2/10000)"
+        },
+        {
+          "name": "input_guardrail",
+          "passed": true,
+          "reason": "Content safe"
+        },
+        {
+          "name": "confidence_gate",
+          "passed": true,
+          "reason": "All evidence criteria met for auto-apply (model-sourced attribution)"
+        },
+        {
+          "name": "scope_guard",
+          "passed": true,
+          "reason": "Patch is within safe scope"
+        },
+        {
+          "name": "confidence_gate",
+          "passed": true,
+          "reason": "All evidence criteria met for auto-apply (model-sourced attribution)"
+        },
+        {
+          "name": "scope_guard",
+          "passed": true,
+          "reason": "Patch is within safe scope"
+        }
+      ],
+      "counterfactual_detail": "Reverted 1 of 1 hunk(s) matching the suspected cause; ran 1 failing test(s); exit 0"
+    },
+    {
+      "pass": 1,
+      "scenario": "csv_default_delimiter",
+      "title": "CSV default delimiter changed to ';'",
+      "expected_layer": "semantic",
+      "final_status": "healed",
+      "summary": "PR opened: dry-run://jazzband/tablib/pull/6",
+      "seconds": 36.5,
+      "model_calls": 4,
+      "model_failed_calls": 0,
+      "model_tokens": 4964,
+      "classified_as": "semantic",
+      "attribution": {
+        "claimed_cause": "The change of `CSVFormat.DEFAULT_DELIMITER` from a comma (`,`) to a semicolon (`;`) in `src/tablib/formats/_csv.py`.",
+        "counterfactual": "pass",
+        "source": "model",
+        "evidence_for": [
+          "The `export_stream_set` method in `src/tablib/formats/_csv.py` writes rows using `cls.DEFAULT_DELIMITER`, which is now `';'`, so the exported CSV string contains semicolons instead of commas, matching the assertion failure in `CSVTests.test_csv_export`.",
+          "The `detect_format` function relies on the presence of a comma delimiter to recognize CSV files; with the default changed to `';'`, it no longer detects the test CSV data (`_csv`), causing `tablib.detect_format(_csv)` to return `None` and failing `TablibTestCase.test_auto_format_detect`.",
+          "The test data in `tests/test_tablib.py` expects a comma\u2011delimited CSV (e.g., `\"first_name,last_name,gpa\\r\\n...\"`), which is no longer produced, directly linking the changed delimiter to the observed mismatches.",
+          "The diff shows the only modification in the CSV format file is the line `DEFAULT_DELIMITER = ';'`, indicating no other code paths were altered that could explain the failure, strengthening the causal link."
+        ],
+        "evidence_against": [],
+        "from_cache": false
+      },
+      "repairs": [
+        {
+          "layer": "semantic",
+          "ok": true,
+          "source": "generation",
+          "bucket": 1,
+          "action": null,
+          "patch": "--- a/src/tablib/formats/_csv.py\n+++ b/src/tablib/formats/_csv.py\n@@\n-    DEFAULT_DELIMITER = ';'\n+    # The default delimiter for CSV files should be a comma (',') to\n+    # conform with the CSV RFC and the expectations of the test suite.\n+    # A previous change mistakenly set this to a semicolon, causing\n+    # exports to use ';' and imports/detection to fail.\n+    DEFAULT_DELIMITER = ','",
+          "description": "ROOT_CAUSE: The CSV format was changed to use a semicolon delimiter, breaking all tests that expect comma\u2011delimited CSVs and the automatic format detection logic that relies on commas.\n\nPROPOSED_FIX:\n"
+        }
+      ],
+      "confidence_gate": {
+        "eligible": true,
+        "reason": "All evidence criteria met for auto-apply (model-sourced attribution)"
+      },
+      "scope_guard": {
+        "in_scope": true,
+        "reason": "Patch is within safe scope"
+      },
+      "verifications": [
+        {
+          "passed": true,
+          "reason": "All tests passed",
+          "tests_passed": 183,
+          "tests_failed": 0
+        }
+      ],
+      "dry_run_pr": {
+        "title": "Kintsugi: fix for failing commit 1cdd149e",
+        "base": "master",
+        "files": [
+          "src/tablib/formats/_csv.py"
+        ]
+      },
+      "guardrails": [
+        {
+          "name": "rate_guard",
+          "passed": true,
+          "reason": "Event recorded (2/10000)"
+        },
+        {
+          "name": "input_guardrail",
+          "passed": true,
+          "reason": "Content safe"
+        },
+        {
+          "name": "confidence_gate",
+          "passed": true,
+          "reason": "All evidence criteria met for auto-apply (model-sourced attribution)"
+        },
+        {
+          "name": "scope_guard",
+          "passed": true,
+          "reason": "Patch is within safe scope"
+        }
+      ],
+      "counterfactual_detail": "Reverted 1 of 1 hunk(s) matching the suspected cause; ran 9 failing test(s); exit 0"
+    },
+    {
+      "pass": 1,
+      "scenario": "json_ascii_escaping",
+      "title": "JSON export escapes non-ASCII",
+      "expected_layer": "semantic",
+      "final_status": "healed",
+      "summary": "PR opened: dry-run://jazzband/tablib/pull/6",
+      "seconds": 38.1,
+      "model_calls": 5,
+      "model_failed_calls": 0,
+      "model_tokens": 4939,
+      "classified_as": "semantic",
+      "attribution": {
+        "claimed_cause": "The change to the JSON export switched `ensure_ascii` from `False` to `True`, causing all non\u2011ASCII characters in the dataset to be escaped (e.g., `\\u540d\\u5b57`) instead of being output as raw Unicode characters.",
+        "counterfactual": "pass",
+        "source": "model",
+        "evidence_for": [
+          "The test compares the exported JSON string to an expected string that contains raw Unicode characters (e.g., `\\u540d\\u5b57`).",
+          "The output string produced by the code contains double\u2011escaped Unicode sequences (`\"\\\\u540d\\\\u5b57\"`).",
+          "The diff shows that `ensure_ascii` was changed from `False` to `True`.",
+          "When `ensure_ascii=True`, `json.dumps` will escape all non\u2011ASCII characters, producing the observed double\u2011escaped output.",
+          "The original implementation used `ensure_ascii=False`, which would preserve the raw Unicode characters as expected by the test."
+        ],
+        "evidence_against": [],
+        "from_cache": false
+      },
+      "repairs": [
+        {
+          "layer": "semantic",
+          "ok": true,
+          "source": "generation",
+          "bucket": 1,
+          "action": null,
+          "patch": "--- a/tablib/serializers/json.py\n+++ b/tablib/serializers/json.py\n@@\n-    def dumps(self, obj, **kwargs):\n-        \"\"\"Return the JSON string representation of *obj*.\"\"\"\n-        return json.dumps(obj, **kwargs)\n+    def dumps(self, obj, **kwargs):\n+        \"\"\"Return the JSON string representation of *obj*.\"\"\"\n+        # Ensure that non\u2011ASCII characters are preserved as raw Unicode\n+        # characters rather than escaped sequences.  The default value\n+        # for ``ensure_ascii`` in the standard library is ``True`` which\n+        # escapes all non\u2011ASCII characters.  The original behaviour\n+        # (and the tests) expect ``ensure_ascii=False``.\n+        kwargs.setdefault(\"ensure_ascii\", False)\n+        return json.dumps(obj, **kwargs)",
+          "description": "ROOT_CAUSE: The JSON export switched `ensure_ascii` to `True`, causing all Unicode characters to be double\u2011escaped instead of output as raw Unicode.\n\nPROPOSED_FIX:\n```diff\n--- a/tablib/serializers/jso"
+        },
+        {
+          "layer": "semantic",
+          "ok": true,
+          "source": "generation",
+          "bucket": 2,
+          "action": null,
+          "patch": "--- a/src/tablib/formats/_json.py\n+++ b/src/tablib/formats/_json.py\n@@\n-        return json.dumps(\n-            dataset.dict, default=serialize_objects_handler, ensure_ascii=True\n-        )\n+        return json.dumps(\n+            dataset.dict, default=serialize_objects_handler, ensure_ascii=False\n+        )",
+          "description": "ROOT_CAUSE: The `export_set` method was incorrectly set to `ensure_ascii=True`, causing non\u2011ASCII characters to be escaped instead of output as raw Unicode, which made the JSON export mismatch the exp"
+        }
+      ],
+      "confidence_gate": {
+        "eligible": true,
+        "reason": "All evidence criteria met for auto-apply (model-sourced attribution)"
+      },
+      "scope_guard": {
+        "in_scope": true,
+        "reason": "Patch is within safe scope"
+      },
+      "verifications": [
+        {
+          "passed": false,
+          "reason": "Patch did not apply: error: No valid patches in input (allow with \"--allow-empty\"); could not re-anchor: path 'tablib/serializers/json.py' not found (0 candidates)",
+          "tests_passed": null,
+          "tests_failed": null
+        },
+        {
+          "passed": true,
+          "reason": "All tests passed",
+          "tests_passed": 183,
+          "tests_failed": 0
+        }
+      ],
+      "dry_run_pr": {
+        "title": "Kintsugi: fix for failing commit 7839f452",
+        "base": "master",
+        "files": [
+          "src/tablib/formats/_json.py"
+        ]
+      },
+      "guardrails": [
+        {
+          "name": "rate_guard",
+          "passed": true,
+          "reason": "Event recorded (2/10000)"
+        },
+        {
+          "name": "input_guardrail",
+          "passed": true,
+          "reason": "Content safe"
+        },
+        {
+          "name": "confidence_gate",
+          "passed": true,
+          "reason": "All evidence criteria met for auto-apply (model-sourced attribution)"
+        },
+        {
+          "name": "scope_guard",
+          "passed": true,
+          "reason": "Patch is within safe scope"
+        },
+        {
+          "name": "confidence_gate",
+          "passed": true,
+          "reason": "All evidence criteria met for auto-apply (model-sourced attribution)"
+        },
+        {
+          "name": "scope_guard",
+          "passed": true,
+          "reason": "Patch is within safe scope"
+        }
+      ],
+      "counterfactual_detail": "Reverted 1 of 1 hunk(s) matching the suspected cause; ran 1 failing test(s); exit 0"
+    },
+    {
+      "pass": 1,
+      "scenario": "tsv_syntax_error",
+      "title": "Missing colon breaks the TSV format module (import-time SyntaxError)",
+      "expected_layer": "structural",
+      "final_status": "escalated",
+      "summary": "Classification: structural \u2192 Handler: structural \u2192 Repair: Success",
+      "seconds": 8.7,
+      "model_calls": 1,
+      "model_failed_calls": 0,
+      "model_tokens": 1840,
+      "classified_as": "structural",
+      "repairs": [
+        {
+          "layer": "structural",
+          "ok": true,
+          "source": "generation",
+          "bucket": null,
+          "action": null,
+          "patch": "--- a/src/tablib/formats/_tsv.py\n+++ b/src/tablib/formats/_tsv.py\n@@\n-class TSVFormat(CSVFormat)\n+class TSVFormat(CSVFormat):\n     title = 'tsv'\n     extensions = ('tsv',)",
+          "description": "PROBLEM: The `TSVFormat` class definition in `src/tablib/formats/_tsv.py` is missing a colon after the class header, causing a `SyntaxError` during import.\n\nSOLUTION:\n```diff\n--- a/src/tablib/formats/"
+        }
+      ],
+      "dry_run_escalation_issue": "Kintsugi escalation: 6b406b58",
+      "guardrails": [
+        {
+          "name": "rate_guard",
+          "passed": true,
+          "reason": "Event recorded (2/10000)"
+        },
+        {
+          "name": "input_guardrail",
+          "passed": true,
+          "reason": "Content safe"
+        },
+        {
+          "name": "confidence_gate",
+          "passed": false,
+          "reason": "No attribution evidence available"
+        },
+        {
+          "name": "scope_guard",
+          "passed": true,
+          "reason": "Patch is within safe scope"
+        }
+      ],
+      "confidence_gate": {
+        "eligible": false,
+        "reason": "No attribution evidence available"
+      },
+      "scope_guard": {
+        "in_scope": true,
+        "reason": "Patch is within safe scope"
+      }
+    },
+    {
+      "pass": 1,
+      "scenario": "infra_connection_timeout",
+      "title": "CI network timeout while installing dependencies",
+      "expected_layer": "mechanical",
+      "final_status": "escalated",
+      "summary": "Classification: mechanical \u2192 Handler: mechanical \u2192 Repair: Success",
+      "seconds": 0.0,
+      "model_calls": 0,
+      "model_failed_calls": 0,
+      "model_tokens": 0,
+      "classified_as": "mechanical",
+      "repairs": [
+        {
+          "layer": "mechanical",
+          "ok": true,
+          "source": "generation",
+          "bucket": null,
+          "action": "Retry: re-run the test suite unchanged (timeout looks transient)",
+          "patch": "",
+          "description": ""
+        }
+      ],
+      "dry_run_escalation_issue": "Kintsugi escalation: c22198fc",
+      "guardrails": [
+        {
+          "name": "rate_guard",
+          "passed": true,
+          "reason": "Event recorded (3/10000)"
+        },
+        {
+          "name": "input_guardrail",
+          "passed": true,
+          "reason": "Content safe"
+        },
+        {
+          "name": "confidence_gate",
+          "passed": false,
+          "reason": "No attribution evidence available"
+        },
+        {
+          "name": "scope_guard",
+          "passed": true,
+          "reason": "Patch is within safe scope"
+        }
+      ],
+      "confidence_gate": {
+        "eligible": false,
+        "reason": "No attribution evidence available"
+      },
+      "scope_guard": {
+        "in_scope": true,
+        "reason": "Patch is within safe scope"
+      }
+    },
+    {
+      "pass": 2,
+      "scenario": "height_off_by_one",
+      "title": "Dataset.height reports one row too few",
+      "expected_layer": "semantic",
+      "final_status": "escalated",
+      "summary": "Classification: semantic \u2192 Attribution: The `Dataset.row_count` property was mistakenly changed to return `len(self._data) - 1` instead of the correct `len(self._data)`. \u2192 Handler: semantic \u2192 Repair: Success (bucket 1) \u2192 Failed Confidence gate",
+      "seconds": 40.3,
+      "model_calls": 4,
+      "model_failed_calls": 0,
+      "model_tokens": 5676,
+      "classified_as": "semantic",
+      "attribution": {
+        "claimed_cause": "The `Dataset.row_count` property was mistakenly changed to return `len(self._data) - 1` instead of the correct `len(self._data)`.",
+        "counterfactual": "pass",
+        "source": "model",
+        "evidence_for": [
+          "The `Dataset.row_count` property is used by the ReST export logic (`ReSTFormat.export_set`) to determine how many rows to iterate over when building the table.",
+          "With the buggy implementation (`len(self._data) - 1`), the export routine will skip the last row of data and treat the header row as data, causing the rows to be rendered in the wrong order.",
+          "The failure log shows the first data row (`False, False, False`) is missing and the last row (`False, False, False`) appears at the bottom, exactly matching the effect of dropping the last row from the iteration.",
+          "The header row (`A`, `B`, `A and B`) is correctly rendered, indicating that the header is still counted separately, while the data rows are off by one.",
+          "No other part of the codebase changes the number of rows, so the only plausible source of the off\u2011by\u2011one behavior is the `row_count` property."
+        ],
+        "evidence_against": [
+          "All four rows appear in the output, not three.",
+          "The output shows a row with \u201cFalse\u00a0False\u00a0False\u201d at the end, indicating that the last row was not omitted.",
+          "The diff only changes the `row_count` property; no other code in the failure logs references `row_count`.",
+          "The failure logs compare expected and actual tables that have identical numbers of rows, suggesting that the row count was not reduced."
+        ],
+        "from_cache": false
+      },
+      "repairs": [
+        {
+          "layer": "semantic",
+          "ok": true,
+          "source": "generation",
+          "bucket": 1,
+          "action": null,
+          "patch": "--- a/tablib/dataset.py\n+++ b/tablib/dataset.py\n@@\n-    @property\n-    def row_count(self) -> int:\n-        \"\"\"Return the number of rows in the dataset.\"\"\"\n-        return len(self._data) - 1\n+    @property\n+    def row_count(self) -> int:\n+        \"\"\"Return the number of rows in the dataset.\"\"\"\n+        # The dataset stores headers in the first row of `_data`; all\n+        # subsequent rows are data rows.  The original implementation\n+        # mistakenly subtracted 1, treating the header row as data and\n+        # dropping the last data row.  The correct count is the full\n+        # length of `_data` (including the header row), which is what\n+        # all callers expect.\n+        return len(self._data)",
+          "description": "ROOT_CAUSE: The `Dataset.row_count` property incorrectly returned `len(self._data) - 1`, causing off\u2011by\u2011one errors in table exports and other row\u2011based operations.  \nPROPOSED_FIX:\n```diff\n--- a/tablib"
+        }
+      ],
+      "confidence_gate": {
+        "eligible": false,
+        "reason": "Evidence contradicts fix: All four rows appear in the output, not three.; The output shows a row with \u201cFalse\u00a0False\u00a0False\u201d at the end, indicating that the last row was not omitted."
+      },
+      "scope_guard": {
+        "in_scope": true,
+        "reason": "Patch is within safe scope"
+      },
+      "dry_run_escalation_issue": "Kintsugi escalation: e2a22d5c",
+      "guardrails": [
+        {
+          "name": "rate_guard",
+          "passed": true,
+          "reason": "Event recorded (4/10000)"
+        },
+        {
+          "name": "input_guardrail",
+          "passed": true,
+          "reason": "Content safe"
+        },
+        {
+          "name": "confidence_gate",
+          "passed": false,
+          "reason": "Evidence contradicts fix: All four rows appear in the output, not three.; The output shows a row with \u201cFalse\u00a0False\u00a0False\u201d at the end, indicating that the last row was not omitted."
+        },
+        {
+          "name": "scope_guard",
+          "passed": true,
+          "reason": "Patch is within safe scope"
+        }
+      ],
+      "counterfactual_detail": "Reverted 1 of 1 hunk(s) matching the suspected cause; ran 54 failing test(s); exit 0"
+    },
+    {
+      "pass": 2,
+      "scenario": "width_off_by_one",
+      "title": "Dataset.width reports one column too many",
+      "expected_layer": "semantic",
+      "final_status": "healed",
+      "summary": "PR opened: dry-run://jazzband/tablib/pull/6",
+      "seconds": 5.6,
+      "model_calls": 0,
+      "model_failed_calls": 0,
+      "model_tokens": 0,
+      "classified_as": "semantic",
+      "attribution": {
+        "claimed_cause": "The change in `Dataset._column_count` added `+ 1` to the length of the first row, causing the reported number of columns to be one greater than the actual data width.",
+        "counterfactual": "pass",
+        "source": "model",
+        "evidence_for": [
+          "The diff shows the change to `Dataset._column_count` adding `+ 1` to the length of the first row, directly altering the reported column count.",
+          "The failures occur in CSV, TSV, and ODS export/import tests, all of which rely on the dataset\u2019s column count to validate row lengths and header alignment.",
+          "The exception types (`tablib.exceptions.InvalidDataError`) are raised when the number of columns reported by the dataset does not match the actual data, a scenario that would be triggered by an inflated column count.",
+          "The tests that fail involve operations that compare the dataset\u2019s column count to the length of each row (e.g., `test_tsv_import_set`, `test_ods_import_set_ragged`), indicating that an incorrect column count would cause these validations to fail.",
+          "The failure logs show that the same exception is raised across multiple formats, suggesting a common underlying issue in the dataset\u2019s column handling rather than format\u2011specific bugs."
+        ],
+        "evidence_against": [],
+        "from_cache": true
+      },
+      "repairs": [
+        {
+          "layer": "semantic",
+          "ok": true,
+          "source": "fix_cache",
+          "bucket": null,
+          "action": null,
+          "patch": "--- a/src/tablib/core.py\n+++ b/src/tablib/core.py\n@@\n-        try:\n-            return len(self._data[0]) + 1\n-        except IndexError:\n-            try:\n-                return len(self.headers)\n-            except TypeError:\n-                return 0\n+        try:\n+            return len(self._data[0])\n+        except IndexError:\n+            try:\n+                return len(self.headers)\n+            except TypeError:\n+                return 0",
+          "description": "Reused verified fix 96f00e14407c from fix-cache (signature match)"
+        }
+      ],
+      "confidence_gate": {
+        "eligible": true,
+        "reason": "All evidence criteria met for auto-apply (model-sourced attribution)"
+      },
+      "scope_guard": {
+        "in_scope": true,
+        "reason": "Patch is within safe scope"
+      },
+      "verifications": [
+        {
+          "passed": true,
+          "reason": "All tests passed",
+          "tests_passed": 183,
+          "tests_failed": 0
+        }
+      ],
+      "dry_run_pr": {
+        "title": "Kintsugi: fix for failing commit 0a40550c",
+        "base": "master",
+        "files": [
+          "src/tablib/core.py"
+        ]
+      },
+      "guardrails": [
+        {
+          "name": "rate_guard",
+          "passed": true,
+          "reason": "Event recorded (4/10000)"
+        },
+        {
+          "name": "input_guardrail",
+          "passed": true,
+          "reason": "Content safe"
+        },
+        {
+          "name": "confidence_gate",
+          "passed": true,
+          "reason": "All evidence criteria met for auto-apply (model-sourced attribution)"
+        },
+        {
+          "name": "scope_guard",
+          "passed": true,
+          "reason": "Patch is within safe scope"
+        }
+      ]
+    },
+    {
+      "pass": 2,
+      "scenario": "sort_reverse_inverted",
+      "title": "Dataset.sort(col_name) ignores/inverts reverse=",
+      "expected_layer": "semantic",
+      "final_status": "healed",
+      "summary": "PR opened: dry-run://jazzband/tablib/pull/6",
+      "seconds": 5.6,
+      "model_calls": 0,
+      "model_failed_calls": 0,
+      "model_tokens": 0,
+      "classified_as": "semantic",
+      "attribution": {
+        "claimed_cause": "The `reverse` flag was inverted in the sorting logic. The line changed from ```python _sorted = sorted(self.dict, key=itemgetter(col), reverse=reverse) ``` to ```python _sorted = sorted(self.dict, key=itemgetter(col), reverse=not reverse) ``` so when `reverse=False` (default ascending) the code now sorts **descending**.",
+        "counterfactual": "pass",
+        "source": "model",
+        "evidence_for": [
+          "The failure message shows that the first row after sorting is `'Thomas', 'Jefferson', 50` instead of the expected `'George', 'Washington', 67`, indicating the sort order is opposite of what the test expects.",
+          "The diff shows that the `reverse` argument passed to `sorted()` was inverted from `reverse=reverse` to `reverse=not reverse`, meaning the default ascending sort (`reverse=False`) now becomes descending.",
+          "The test `test_sorting` expects the dataset to be sorted in ascending order by default, which aligns with the original code but conflicts with the modified code that now sorts descending.",
+          "The `sorted` call uses `key=itemgetter(col)` correctly, so the only change affecting order is the `reverse` flag, directly pointing to the inversion as the root cause.",
+          "No other parts of the code or tests indicate a change in sorting logic, so the inversion is the sole plausible explanation for the observed failure."
+        ],
+        "evidence_against": [],
+        "from_cache": true
+      },
+      "repairs": [
+        {
+          "layer": "semantic",
+          "ok": true,
+          "source": "fix_cache",
+          "bucket": null,
+          "action": null,
+          "patch": "--- a/src/tablib/core.py\n+++ b/src/tablib/core.py\n@@\n-            _sorted = sorted(self.dict, key=itemgetter(col), reverse=not reverse)\n+            _sorted = sorted(self.dict, key=itemgetter(col), reverse=reverse)",
+          "description": "Reused verified fix 1b442e856b9d from fix-cache (signature match)"
+        }
+      ],
+      "confidence_gate": {
+        "eligible": true,
+        "reason": "All evidence criteria met for auto-apply (model-sourced attribution)"
+      },
+      "scope_guard": {
+        "in_scope": true,
+        "reason": "Patch is within safe scope"
+      },
+      "verifications": [
+        {
+          "passed": true,
+          "reason": "All tests passed",
+          "tests_passed": 183,
+          "tests_failed": 0
+        }
+      ],
+      "dry_run_pr": {
+        "title": "Kintsugi: fix for failing commit b97da89d",
+        "base": "master",
+        "files": [
+          "src/tablib/core.py"
+        ]
+      },
+      "guardrails": [
+        {
+          "name": "rate_guard",
+          "passed": true,
+          "reason": "Event recorded (5/10000)"
+        },
+        {
+          "name": "input_guardrail",
+          "passed": true,
+          "reason": "Content safe"
+        },
+        {
+          "name": "confidence_gate",
+          "passed": true,
+          "reason": "All evidence criteria met for auto-apply (model-sourced attribution)"
+        },
+        {
+          "name": "scope_guard",
+          "passed": true,
+          "reason": "Patch is within safe scope"
+        }
+      ]
+    },
+    {
+      "pass": 2,
+      "scenario": "transpose_branch_swapped",
+      "title": "transpose() picks the wrong code path for headers",
+      "expected_layer": "semantic",
+      "final_status": "healed",
+      "summary": "PR opened: dry-run://jazzband/tablib/pull/6",
+      "seconds": 5.7,
+      "model_calls": 0,
+      "model_failed_calls": 0,
+      "model_tokens": 0,
+      "classified_as": "semantic",
+      "attribution": {
+        "claimed_cause": "The condition that selects the transpose implementation was inverted. In `Dataset.transpose()` the original logic was: ```python if self.headers is None: return self._transpose_without_headers() else: return self._transpose_with_headers() ``` The patch changed it to: ```python if self.headers is not None: return self._transpose_without_headers() else: return self._transpose_with_headers() ``` Thus when `self.headers` is `None`, the code now incorrectly calls `_transpose_with_headers`, which expects headers to exist and fails.",
+        "counterfactual": "pass",
+        "source": "model",
+        "evidence_for": [
+          "The failure log shows a `TypeError` in `_transpose_with_headers` where it accesses `self.headers[0]`, implying `self.headers` is `None` at that point.",
+          "The test `test_transpose_multiple_headers` calls `data.transpose()` on a dataset with no headers, expecting `_transpose_without_headers()` to be used, but the stack trace shows `_transpose_with_headers()` was called instead.",
+          "The diff shows the condition was inverted: `if self.headers is not None:` now triggers `_transpose_without_headers()`, causing the wrong branch to execute when `self.headers` is `None`.",
+          "The `test_transpose` failure shows that `transposed_founders.headers` is `None` after transpose, whereas it should contain the original headers, indicating the transpose logic did not preserve headers correctly.",
+          "The original logic `if self.headers is None: return self._transpose_without_headers()` correctly selected the header\u2011less transpose, whereas the patched logic mistakenly selects the header\u2011aware branch when `self.headers` is `None`."
+        ],
+        "evidence_against": [],
+        "from_cache": true
+      },
+      "repairs": [
+        {
+          "layer": "semantic",
+          "ok": true,
+          "source": "fix_cache",
+          "bucket": null,
+          "action": null,
+          "patch": "--- a/src/tablib/core.py\n+++ b/src/tablib/core.py\n@@\n-        if self.headers is not None:\n-            return self._transpose_without_headers()\n-        else:\n-            return self._transpose_with_headers()\n+        # If the dataset has no headers, use the header\u2011less transpose.\n+        if self.headers is None:\n+            return self._transpose_without_headers()\n+        else:\n+            return self._transpose_with_headers()",
+          "description": "Reused verified fix 8a536bf709bd from fix-cache (signature match)"
+        }
+      ],
+      "confidence_gate": {
+        "eligible": true,
+        "reason": "All evidence criteria met for auto-apply (model-sourced attribution)"
+      },
+      "scope_guard": {
+        "in_scope": true,
+        "reason": "Patch is within safe scope"
+      },
+      "verifications": [
+        {
+          "passed": true,
+          "reason": "All tests passed",
+          "tests_passed": 183,
+          "tests_failed": 0
+        }
+      ],
+      "dry_run_pr": {
+        "title": "Kintsugi: fix for failing commit 183bbfc5",
+        "base": "master",
+        "files": [
+          "src/tablib/core.py"
+        ]
+      },
+      "guardrails": [
+        {
+          "name": "rate_guard",
+          "passed": true,
+          "reason": "Event recorded (5/10000)"
+        },
+        {
+          "name": "input_guardrail",
+          "passed": true,
+          "reason": "Content safe"
+        },
+        {
+          "name": "confidence_gate",
+          "passed": true,
+          "reason": "All evidence criteria met for auto-apply (model-sourced attribution)"
+        },
+        {
+          "name": "scope_guard",
+          "passed": true,
+          "reason": "Patch is within safe scope"
+        }
+      ]
+    },
+    {
+      "pass": 2,
+      "scenario": "remove_duplicates_noop",
+      "title": "remove_duplicates() keeps duplicates",
+      "expected_layer": "semantic",
+      "final_status": "healed",
+      "summary": "PR opened: dry-run://jazzband/tablib/pull/6",
+      "seconds": 5.6,
+      "model_calls": 0,
+      "model_failed_calls": 0,
+      "model_tokens": 0,
+      "classified_as": "semantic",
+      "attribution": {
+        "claimed_cause": "The change in `remove_duplicates` replaced the logical **`or`** with **`and`** in the list\u2011comprehension condition. The original logic was: ```python row for row in self._data if not (tuple(row) in seen or seen.add(tuple(row))) ``` which keeps a row only when it has not been seen before. The new logic: ```python row for row in self._data if not (tuple(row) in seen and seen.add(tuple(row))) ``` uses `and` instead of `or`, causing the condition to evaluate to `True` for every row, so no duplicates are removed.",
+        "counterfactual": "pass",
+        "source": "model",
+        "evidence_for": [
+          "The failure shows that `self.founders.height` remains 6 instead of the expected 3, indicating duplicates were not removed.",
+          "The diff shows the list\u2011comprehension condition changed from `or` to `and`.",
+          "The original logic `if not (tuple(row) in seen or seen.add(tuple(row)))` correctly skips rows that are already in `seen`.",
+          "Replacing `or` with `and` makes the condition `if not (tuple(row) in seen and seen.add(tuple(row)))` always evaluate to `False` for new rows, because `seen.add` returns `None`, so the `and` short\u2011circuits and the whole expression becomes `False`. Thus the `not` makes it `True` for all rows, keeping every row.",
+          "The test expects the dataset to shrink to 3 unique rows, but the dataset remains at 6, matching the behavior of the buggy `and` logic."
+        ],
+        "evidence_against": [],
+        "from_cache": true
+      },
+      "repairs": [
+        {
+          "layer": "semantic",
+          "ok": true,
+          "source": "fix_cache",
+          "bucket": null,
+          "action": null,
+          "patch": "--- a/src/tablib/core.py\n+++ b/src/tablib/core.py\n@@\n-        self._data[:] = [\n-            row for row in self._data if not (tuple(row) in seen and seen.add(tuple(row)))\n-        ]\n+        self._data[:] = [\n+            row for row in self._data if not (tuple(row) in seen or seen.add(tuple(row)))\n+        ]",
+          "description": "Reused verified fix 9004cf67cd0e from fix-cache (signature match)"
+        }
+      ],
+      "confidence_gate": {
+        "eligible": true,
+        "reason": "All evidence criteria met for auto-apply (model-sourced attribution)"
+      },
+      "scope_guard": {
+        "in_scope": true,
+        "reason": "Patch is within safe scope"
+      },
+      "verifications": [
+        {
+          "passed": true,
+          "reason": "All tests passed",
+          "tests_passed": 183,
+          "tests_failed": 0
+        }
+      ],
+      "dry_run_pr": {
+        "title": "Kintsugi: fix for failing commit 21579dc8",
+        "base": "master",
+        "files": [
+          "src/tablib/core.py"
+        ]
+      },
+      "guardrails": [
+        {
+          "name": "rate_guard",
+          "passed": true,
+          "reason": "Event recorded (6/10000)"
+        },
+        {
+          "name": "input_guardrail",
+          "passed": true,
+          "reason": "Content safe"
+        },
+        {
+          "name": "confidence_gate",
+          "passed": true,
+          "reason": "All evidence criteria met for auto-apply (model-sourced attribution)"
+        },
+        {
+          "name": "scope_guard",
+          "passed": true,
+          "reason": "Patch is within safe scope"
+        }
+      ]
+    },
+    {
+      "pass": 2,
+      "scenario": "row_lpush_appends",
+      "title": "Row.lpush() inserts at the end instead of the front",
+      "expected_layer": "semantic",
+      "final_status": "healed",
+      "summary": "PR opened: dry-run://jazzband/tablib/pull/6",
+      "seconds": 5.6,
+      "model_calls": 0,
+      "model_failed_calls": 0,
+      "model_tokens": 0,
+      "classified_as": "semantic",
+      "attribution": {
+        "claimed_cause": "The `lpush` method was mistakenly changed to insert at the end of the row (`self.insert(len(self._row), value)`) instead of at the beginning (`self.insert(0, value)`).",
+        "counterfactual": "pass",
+        "source": "model",
+        "evidence_for": [
+          "test_row_lpush expected the new value to appear at index\u202f0, but the actual list was [John, Adams, 90, 53] \u2013 the value was appended instead of prepended",
+          "the diff shows the lpush method was changed from `self.insert(0, value)` to `self.insert(len(self._row), value)`",
+          "the original implementation of lpush in the library\u2019s documentation and earlier tests prepends the value to the row, not appends it."
+        ],
+        "evidence_against": [],
+        "from_cache": true
+      },
+      "repairs": [
+        {
+          "layer": "semantic",
+          "ok": true,
+          "source": "fix_cache",
+          "bucket": null,
+          "action": null,
+          "patch": "--- a/src/tablib/core.py\n+++ b/src/tablib/core.py\n@@\n     def rpush(self, value):\n         self.insert(len(self._row), value)\n \n     def lpush(self, value):\n-        self.insert(len(self._row), value)\n+        self.insert(0, value)\n \n     def append(self, value):\n         self.rpush(value)",
+          "description": "Reused verified fix deff30180b3e from fix-cache (signature match)"
+        }
+      ],
+      "confidence_gate": {
+        "eligible": true,
+        "reason": "All evidence criteria met for auto-apply (model-sourced attribution)"
+      },
+      "scope_guard": {
+        "in_scope": true,
+        "reason": "Patch is within safe scope"
+      },
+      "verifications": [
+        {
+          "passed": true,
+          "reason": "All tests passed",
+          "tests_passed": 183,
+          "tests_failed": 0
+        }
+      ],
+      "dry_run_pr": {
+        "title": "Kintsugi: fix for failing commit fbfe063e",
+        "base": "master",
+        "files": [
+          "src/tablib/core.py"
+        ]
+      },
+      "guardrails": [
+        {
+          "name": "rate_guard",
+          "passed": true,
+          "reason": "Event recorded (5/10000)"
+        },
+        {
+          "name": "input_guardrail",
+          "passed": true,
+          "reason": "Content safe"
+        },
+        {
+          "name": "confidence_gate",
+          "passed": true,
+          "reason": "All evidence criteria met for auto-apply (model-sourced attribution)"
+        },
+        {
+          "name": "scope_guard",
+          "passed": true,
+          "reason": "Patch is within safe scope"
+        }
+      ]
+    },
+    {
+      "pass": 2,
+      "scenario": "csv_default_delimiter",
+      "title": "CSV default delimiter changed to ';'",
+      "expected_layer": "semantic",
+      "final_status": "healed",
+      "summary": "PR opened: dry-run://jazzband/tablib/pull/6",
+      "seconds": 5.5,
+      "model_calls": 0,
+      "model_failed_calls": 0,
+      "model_tokens": 0,
+      "classified_as": "semantic",
+      "attribution": {
+        "claimed_cause": "The change of `CSVFormat.DEFAULT_DELIMITER` from a comma (`,`) to a semicolon (`;`) in `src/tablib/formats/_csv.py`.",
+        "counterfactual": "pass",
+        "source": "model",
+        "evidence_for": [
+          "The `export_stream_set` method in `src/tablib/formats/_csv.py` writes rows using `cls.DEFAULT_DELIMITER`, which is now `';'`, so the exported CSV string contains semicolons instead of commas, matching the assertion failure in `CSVTests.test_csv_export`.",
+          "The `detect_format` function relies on the presence of a comma delimiter to recognize CSV files; with the default changed to `';'`, it no longer detects the test CSV data (`_csv`), causing `tablib.detect_format(_csv)` to return `None` and failing `TablibTestCase.test_auto_format_detect`.",
+          "The test data in `tests/test_tablib.py` expects a comma\u2011delimited CSV (e.g., `\"first_name,last_name,gpa\\r\\n...\"`), which is no longer produced, directly linking the changed delimiter to the observed mismatches.",
+          "The diff shows the only modification in the CSV format file is the line `DEFAULT_DELIMITER = ';'`, indicating no other code paths were altered that could explain the failure, strengthening the causal link."
+        ],
+        "evidence_against": [],
+        "from_cache": true
+      },
+      "repairs": [
+        {
+          "layer": "semantic",
+          "ok": true,
+          "source": "fix_cache",
+          "bucket": null,
+          "action": null,
+          "patch": "--- a/src/tablib/formats/_csv.py\n+++ b/src/tablib/formats/_csv.py\n@@\n-    DEFAULT_DELIMITER = ';'\n+    # The default delimiter for CSV files should be a comma (',') to\n+    # conform with the CSV RFC and the expectations of the test suite.\n+    # A previous change mistakenly set this to a semicolon, causing\n+    # exports to use ';' and imports/detection to fail.\n+    DEFAULT_DELIMITER = ','",
+          "description": "Reused verified fix 3ddce06c53c3 from fix-cache (signature match)"
+        }
+      ],
+      "confidence_gate": {
+        "eligible": true,
+        "reason": "All evidence criteria met for auto-apply (model-sourced attribution)"
+      },
+      "scope_guard": {
+        "in_scope": true,
+        "reason": "Patch is within safe scope"
+      },
+      "verifications": [
+        {
+          "passed": true,
+          "reason": "All tests passed",
+          "tests_passed": 183,
+          "tests_failed": 0
+        }
+      ],
+      "dry_run_pr": {
+        "title": "Kintsugi: fix for failing commit 1cdd149e",
+        "base": "master",
+        "files": [
+          "src/tablib/formats/_csv.py"
+        ]
+      },
+      "guardrails": [
+        {
+          "name": "rate_guard",
+          "passed": true,
+          "reason": "Event recorded (6/10000)"
+        },
+        {
+          "name": "input_guardrail",
+          "passed": true,
+          "reason": "Content safe"
+        },
+        {
+          "name": "confidence_gate",
+          "passed": true,
+          "reason": "All evidence criteria met for auto-apply (model-sourced attribution)"
+        },
+        {
+          "name": "scope_guard",
+          "passed": true,
+          "reason": "Patch is within safe scope"
+        }
+      ]
+    },
+    {
+      "pass": 2,
+      "scenario": "json_ascii_escaping",
+      "title": "JSON export escapes non-ASCII",
+      "expected_layer": "semantic",
+      "final_status": "healed",
+      "summary": "PR opened: dry-run://jazzband/tablib/pull/6",
+      "seconds": 5.5,
+      "model_calls": 0,
+      "model_failed_calls": 0,
+      "model_tokens": 0,
+      "classified_as": "semantic",
+      "attribution": {
+        "claimed_cause": "The change to the JSON export switched `ensure_ascii` from `False` to `True`, causing all non\u2011ASCII characters in the dataset to be escaped (e.g., `\\u540d\\u5b57`) instead of being output as raw Unicode characters.",
+        "counterfactual": "pass",
+        "source": "model",
+        "evidence_for": [
+          "The test compares the exported JSON string to an expected string that contains raw Unicode characters (e.g., `\\u540d\\u5b57`).",
+          "The output string produced by the code contains double\u2011escaped Unicode sequences (`\"\\\\u540d\\\\u5b57\"`).",
+          "The diff shows that `ensure_ascii` was changed from `False` to `True`.",
+          "When `ensure_ascii=True`, `json.dumps` will escape all non\u2011ASCII characters, producing the observed double\u2011escaped output.",
+          "The original implementation used `ensure_ascii=False`, which would preserve the raw Unicode characters as expected by the test."
+        ],
+        "evidence_against": [],
+        "from_cache": true
+      },
+      "repairs": [
+        {
+          "layer": "semantic",
+          "ok": true,
+          "source": "fix_cache",
+          "bucket": null,
+          "action": null,
+          "patch": "--- a/src/tablib/formats/_json.py\n+++ b/src/tablib/formats/_json.py\n@@\n-        return json.dumps(\n-            dataset.dict, default=serialize_objects_handler, ensure_ascii=True\n-        )\n+        return json.dumps(\n+            dataset.dict, default=serialize_objects_handler, ensure_ascii=False\n+        )",
+          "description": "Reused verified fix b5fba477d888 from fix-cache (signature match)"
+        }
+      ],
+      "confidence_gate": {
+        "eligible": true,
+        "reason": "All evidence criteria met for auto-apply (model-sourced attribution)"
+      },
+      "scope_guard": {
+        "in_scope": true,
+        "reason": "Patch is within safe scope"
+      },
+      "verifications": [
+        {
+          "passed": true,
+          "reason": "All tests passed",
+          "tests_passed": 183,
+          "tests_failed": 0
+        }
+      ],
+      "dry_run_pr": {
+        "title": "Kintsugi: fix for failing commit 7839f452",
+        "base": "master",
+        "files": [
+          "src/tablib/formats/_json.py"
+        ]
+      },
+      "guardrails": [
+        {
+          "name": "rate_guard",
+          "passed": true,
+          "reason": "Event recorded (7/10000)"
+        },
+        {
+          "name": "input_guardrail",
+          "passed": true,
+          "reason": "Content safe"
+        },
+        {
+          "name": "confidence_gate",
+          "passed": true,
+          "reason": "All evidence criteria met for auto-apply (model-sourced attribution)"
+        },
+        {
+          "name": "scope_guard",
+          "passed": true,
+          "reason": "Patch is within safe scope"
+        }
+      ]
+    },
+    {
+      "pass": 2,
+      "scenario": "tsv_syntax_error",
+      "title": "Missing colon breaks the TSV format module (import-time SyntaxError)",
+      "expected_layer": "structural",
+      "final_status": "escalated",
+      "summary": "Classification: structural \u2192 Handler: structural \u2192 Repair: Success",
+      "seconds": 1.6,
+      "model_calls": 1,
+      "model_failed_calls": 0,
+      "model_tokens": 1840,
+      "classified_as": "structural",
+      "repairs": [
+        {
+          "layer": "structural",
+          "ok": true,
+          "source": "generation",
+          "bucket": null,
+          "action": null,
+          "patch": "--- a/src/tablib/formats/_tsv.py\n+++ b/src/tablib/formats/_tsv.py\n@@\n-class TSVFormat(CSVFormat)\n+class TSVFormat(CSVFormat):\n     title = 'tsv'\n     extensions = ('tsv',)",
+          "description": "PROBLEM: The `TSVFormat` class definition in `src/tablib/formats/_tsv.py` is missing a colon after the class header, causing a `SyntaxError` during import.\n\nSOLUTION:\n```diff\n--- a/src/tablib/formats/"
+        }
+      ],
+      "dry_run_escalation_issue": "Kintsugi escalation: 6b406b58",
+      "guardrails": [
+        {
+          "name": "rate_guard",
+          "passed": true,
+          "reason": "Event recorded (8/10000)"
+        },
+        {
+          "name": "input_guardrail",
+          "passed": true,
+          "reason": "Content safe"
+        },
+        {
+          "name": "confidence_gate",
+          "passed": false,
+          "reason": "No attribution evidence available"
+        },
+        {
+          "name": "scope_guard",
+          "passed": true,
+          "reason": "Patch is within safe scope"
+        }
+      ],
+      "confidence_gate": {
+        "eligible": false,
+        "reason": "No attribution evidence available"
+      },
+      "scope_guard": {
+        "in_scope": true,
+        "reason": "Patch is within safe scope"
+      }
+    },
+    {
+      "pass": 2,
+      "scenario": "infra_connection_timeout",
+      "title": "CI network timeout while installing dependencies",
+      "expected_layer": "mechanical",
+      "final_status": "escalated",
+      "summary": "Classification: mechanical \u2192 Handler: mechanical \u2192 Repair: Success",
+      "seconds": 0.0,
+      "model_calls": 0,
+      "model_failed_calls": 0,
+      "model_tokens": 0,
+      "classified_as": "mechanical",
+      "repairs": [
+        {
+          "layer": "mechanical",
+          "ok": true,
+          "source": "generation",
+          "bucket": null,
+          "action": "Retry: re-run the test suite unchanged (timeout looks transient)",
+          "patch": "",
+          "description": ""
+        }
+      ],
+      "dry_run_escalation_issue": "Kintsugi escalation: c22198fc",
+      "guardrails": [
+        {
+          "name": "rate_guard",
+          "passed": true,
+          "reason": "Event recorded (9/10000)"
+        },
+        {
+          "name": "input_guardrail",
+          "passed": true,
+          "reason": "Content safe"
+        },
+        {
+          "name": "confidence_gate",
+          "passed": false,
+          "reason": "No attribution evidence available"
+        },
+        {
+          "name": "scope_guard",
+          "passed": true,
+          "reason": "Patch is within safe scope"
+        }
+      ],
+      "confidence_gate": {
+        "eligible": false,
+        "reason": "No attribution evidence available"
+      },
+      "scope_guard": {
+        "in_scope": true,
+        "reason": "Patch is within safe scope"
+      }
+    }
+  ],
+  "cache_metrics": {
+    "counters": {
+      "lookup.signature_miss": 9,
+      "lookup.none": 9,
+      "bucket.used": 15,
+      "bucket.used.bucket_1": 9,
+      "bucket.used.tokens": 23373,
+      "bucket.used.bucket_2": 6,
+      "store": 7,
+      "lookup.signature_hit": 7,
+      "reuse.verified_pass": 7
+    },
+    "exact_hit_rate": 0.0,
+    "near_hit_rate": 0.0,
+    "signature_hit_rate": 0.4375,
+    "reuse_pass_rate": 1.0,
+    "busts": 0
+  }
+}

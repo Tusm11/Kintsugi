@@ -40,6 +40,28 @@ class ModelResponse:
         return self.estimated_input_cost + self.estimated_output_cost
 
 
+def completion_token_limit(budget_tokens: int, provider_cap: int) -> int:
+    """
+    max_tokens actually requested for a call.
+    
+    Callers pass small budgets (300-500 tokens for evidence/diagnosis). That is
+    fine for ordinary chat models but starves reasoning models, whose hidden
+    reasoning counts against the same limit. Two env knobs:
+    
+        KINTSUGI_MIN_COMPLETION_TOKENS  floor applied to every call (default 0)
+        KINTSUGI_MAX_COMPLETION_TOKENS  ceiling (default: the provider's own cap)
+    """
+    floor = int(os.getenv("KINTSUGI_MIN_COMPLETION_TOKENS", "0") or 0)
+    cap = int(os.getenv("KINTSUGI_MAX_COMPLETION_TOKENS", str(provider_cap)) or provider_cap)
+    return max(1, min(max(budget_tokens, floor), cap))
+
+
+def _groq_extra() -> dict:
+    """Optional GROQ_REASONING_EFFORT (low/medium/high) for Groq reasoning models."""
+    effort = os.getenv("GROQ_REASONING_EFFORT")
+    return {"extra_body": {"reasoning_effort": effort}} if effort else {}
+
+
 class ModelProvider(ABC):
     """Abstract base class for model providers - user can choose any provider for any task"""
     
@@ -119,6 +141,18 @@ class ModelProvider(ABC):
             try:
                 success, response = self.call(prompt, budget_tokens, temperature)
                 response.retry_count = attempt
+                
+                # A completion with no text is not an answer. Reasoning models
+                # (e.g. gpt-oss) can spend the whole token budget thinking and
+                # return content=None; treating that as success would let an
+                # empty diagnosis pass as "no counter-evidence". Not retried:
+                # the same budget would produce the same empty answer.
+                if success and not (response.content or "").strip():
+                    response.content = (
+                        f"Empty completion (stop_reason={response.stop_reason}); "
+                        "raise KINTSUGI_MIN_COMPLETION_TOKENS or lower the reasoning effort"
+                    )
+                    return False, response
                 
                 if success:
                     return True, response
@@ -268,8 +302,9 @@ class GroqProvider(ModelProvider):
             completion = client.chat.completions.create(
                 model=self.model_name,
                 messages=[{"role": "user", "content": prompt}],
-                max_tokens=min(budget_tokens, 2000),
+                max_tokens=completion_token_limit(budget_tokens, 2000),
                 temperature=temperature,
+                **_groq_extra(),
             )
             
             input_tokens = completion.usage.prompt_tokens
@@ -360,7 +395,7 @@ class OpenAIProvider(ModelProvider):
             completion = client.chat.completions.create(
                 model=self.model_name,
                 messages=[{"role": "user", "content": prompt}],
-                max_tokens=min(budget_tokens, 3000),
+                max_tokens=completion_token_limit(budget_tokens, 3000),
                 temperature=temperature,
             )
             
@@ -452,7 +487,7 @@ class AnthropicProvider(ModelProvider):
             
             message = client.messages.create(
                 model=self.model_name,
-                max_tokens=min(budget_tokens, 3000),
+                max_tokens=completion_token_limit(budget_tokens, 3000),
                 messages=[{"role": "user", "content": prompt}],
                 temperature=temperature,
             )
@@ -540,7 +575,7 @@ class OpenRouterProvider(ModelProvider):
             data = {
                 "model": self.model_name,
                 "messages": [{"role": "user", "content": prompt}],
-                "max_tokens": min(budget_tokens, 3000),
+                "max_tokens": completion_token_limit(budget_tokens, 3000),
                 "temperature": temperature,
             }
             

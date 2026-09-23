@@ -159,13 +159,45 @@ class InputGuardrail:
             if re.search(pattern, content, re.IGNORECASE):
                 return False, f"Potential injection detected: {pattern}"
         
-        # Check for suspicious encoding or escape sequences
-        if "\\x" in content or "\\u00" in content:
-            # Could be obfuscated injection
-            if re.search(r"\\x[0-9a-fA-F]{2}", content):
-                return False, "Suspicious hex encoding detected"
+        # Check for obfuscated text hidden in escape sequences.
+        # Python's own reprs (e.g. pytest printing b'\\x03r\\x06...') never escape
+        # printable ASCII: printable bytes are shown as themselves and only
+        # control/non-ASCII bytes appear as \\xNN. So a run of escapes that
+        # decodes to printable text was written deliberately, which is the
+        # obfuscation this check exists for. Binary test output passes.
+        hidden = self._decode_escaped_printable_text(content)
+        if hidden:
+            for pattern in self.injection_patterns:
+                if re.search(pattern, hidden, re.IGNORECASE):
+                    return False, f"Hex-escaped injection detected: {pattern}"
+            return False, "Suspicious hex encoding detected (escaped printable text)"
         
         return True, "Content is safe"
+    
+    _ESCAPE_RUN_RE = re.compile(r"(?:\\x[0-9a-fA-F]{2}|\\u00[0-9a-fA-F]{2})+")
+    
+    @classmethod
+    def _decode_escaped_printable_text(cls, content: str) -> str:
+        """
+        Return printable text hidden in \\xNN / \\u00NN escape runs, or "".
+        
+        Only runs with at least two consecutive printable-ASCII characters
+        count: a single escaped printable byte is not a message, and escaped
+        non-printable bytes are ordinary binary data.
+        """
+        found = []
+        for run in cls._ESCAPE_RUN_RE.findall(content or ""):
+            codes = [int(h, 16) for h in re.findall(r"(?:x|u00)([0-9a-fA-F]{2})", run)]
+            text, best = "", ""
+            for c in codes:
+                if 0x20 <= c <= 0x7E:
+                    text += chr(c)
+                    best = text if len(text) > len(best) else best
+                else:
+                    text = ""
+            if len(best) >= 2:
+                found.append(best)
+        return " ".join(found)
     
     def scan_run(self, run: Run) -> Tuple[bool, str]:
         """
@@ -288,6 +320,14 @@ class OutputGuardrail:
         return True, "Repair output appears safe"
 
 
+# Placeholders the AttributionEngine uses when it has no real cause.
+_PLACEHOLDER_CAUSES = frozenset({
+    "Model could not identify specific causes",
+    "Heuristic analysis inconclusive - model unavailable",
+    "Unknown cause",
+})
+
+
 class ConfidenceGate:
     """
     Decides whether a proposed fix is eligible for automatic application.
@@ -334,6 +374,15 @@ class ConfidenceGate:
         # Check 1: Counterfactual result must indicate pass
         if attr.counterfactual_result != "pass":
             return False, f"Counterfactual inconclusive: {attr.counterfactual_result}"
+        
+        # Check 1b: There must be a real diagnosis to trust. An empty or
+        # placeholder cause, or no supporting evidence at all, means the model
+        # produced nothing to audit; "nothing against it" is then meaningless.
+        cause = (attr.claimed_cause or "").strip()
+        if not cause or cause in _PLACEHOLDER_CAUSES:
+            return False, "No usable claimed cause (model produced no diagnosis)"
+        if not attr.evidence_for:
+            return False, "No supporting evidence recorded for the claimed cause"
         
         # Check 2: No evidence against the fix
         if attr.evidence_against and len(attr.evidence_against) > 0:

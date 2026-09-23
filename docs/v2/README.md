@@ -71,6 +71,11 @@ The v2 semantic path could not work without these fixes. They also explain some 
 
 ## Known limits (not addressed by v2)
 
-- **The AttributionEngine returns filler as evidence.** When the model finds nothing, strings like `"No contradicting evidence found"` land in `evidence_against`, and the Confidence Gate then rejects the Run because `evidence_against` is non-empty. The similarity function ignores these strings, but the gate does not.
+- **The model can invent counter-evidence.** In the tablib trial the model once listed a false contradiction ("all four rows are present") for a cause the executed counterfactual had confirmed, and the Confidence Gate escalated. Safe, but it costs heals. (The earlier filler-as-evidence bug is fixed: "NONE"/filler is parsed out, and the gate now also requires a real cause and supporting evidence.)
+- **Structural and mechanical failures never auto-heal.** The v1 path requires an attribution at the Confidence Gate, which only semantic Runs have.
+
+## Tablib trial
+
+`eval/tablib_trial.py` (see [eval/README.md](../../eval/README.md)); results of the first full run with `groq / openai/gpt-oss-20b` are in `eval/results/tablib-20260923-061715.md`: 7/8 seeded logic regressions healed and verified by tablib's full suite; on replay all 7 came from the fix-cache (re-verified) with 5 model calls instead of 39.
 - **Scope Guard checks `run.diff`, not the patch.** It measures the commit that broke CI rather than the proposed or cached patch. The same limitation existed in v1.
 - **No checkout, no neighbouring code.** Bucket 2's "surrounding code" needs a `code_context_provider`, because the webhook carries only the diff and logs.

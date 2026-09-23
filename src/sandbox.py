@@ -130,6 +130,7 @@ class PatchRunResult:
     apply_error: str = ""
     tests: Optional[SuiteRunResult] = None
     head_commit: str = ""
+    apply_note: str = ""  # e.g. "re-anchored: hunk line numbers rebuilt"
 
     @property
     def passed(self) -> bool:
@@ -254,7 +255,33 @@ class RepoSandbox:
                 self._git(str(workdir), *args, "-", input_bytes=data)
                 return True, ""
             errors.append(check.stderr.decode(errors="replace").strip())
-        return False, errors[0] or "git apply --check failed"
+        
+        # Model-written patches often omit hunk line numbers ("@@" alone) or get
+        # the path prefix wrong. Re-anchor them against the real file, but only
+        # when every hunk's old lines match exactly one place; then apply the
+        # rebuilt patch through git as usual. Never used for reverse patches.
+        if not reverse:
+            tracked = self._git(str(workdir), "ls-files", check=False).stdout.decode(errors="replace").splitlines()
+            anchored, note = anchor_patch(text, workdir, tracked)
+            if anchored is not None:
+                adata = anchored.encode("utf-8")
+                args = base + ["--unidiff-zero"]
+                check = self._git(str(workdir), *args, "--check", "-", check=False, input_bytes=adata)
+                if check.returncode == 0:
+                    self._git(str(workdir), *args, "-", input_bytes=adata)
+                    return True, f"re-anchored: {note}"
+                errors.append(check.stderr.decode(errors="replace").strip())
+            else:
+                errors.append(f"could not re-anchor: {note}")
+        return False, "; ".join(e for e in errors[:1] + errors[2:] if e) or "git apply --check failed"
+    
+    def show_file(self, repo: str, commit: str, path: str) -> Optional[str]:
+        """Contents of `path` at `commit` in the configured checkout (read-only, no worktree)."""
+        source = self.checkout_path(repo)
+        if not source or not Path(source, ".git").exists():
+            return None
+        proc = self._git(source, "show", f"{commit}:{path}", check=False)
+        return proc.stdout.decode("utf-8", errors="replace") if proc.returncode == 0 else None
     
     def head_commit(self, workdir: Path) -> str:
         return self._git(str(workdir), "rev-parse", "HEAD").stdout.decode().strip()
@@ -301,11 +328,13 @@ class RepoSandbox:
         try:
             with self.worktree(repo, commit) as wt:
                 head = self.head_commit(wt)
+                note = ""
                 if patch is not None:
                     ok, err = self.apply_patch(wt, patch, reverse=reverse)
                     if not ok:
                         return PatchRunResult(False, err, None, head)
-                return PatchRunResult(True, "", self.run_tests(wt, test_ids), head)
+                    note = err
+                return PatchRunResult(True, "", self.run_tests(wt, test_ids), head, note)
         except SandboxError as exc:
             return PatchRunResult(False, str(exc))
 
@@ -341,3 +370,88 @@ def _parse_counts(output: str) -> Dict[str, int]:
                 counts[kind] = int(n)
             break
     return counts
+
+
+
+# ---------------------------------------------------------------------------
+# Re-anchoring model-written patches
+# ---------------------------------------------------------------------------
+
+def _parse_loose_patch(text: str) -> List[Tuple[str, List[List[str]]]]:
+    """[(path, [hunk_lines, ...]), ...] from a unified diff whose @@ headers may lack ranges."""
+    files: List[Tuple[str, List[List[str]]]] = []
+    lines = text.splitlines()
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        if line.startswith("--- ") and i + 1 < len(lines) and lines[i + 1].startswith("+++ "):
+            new_path = lines[i + 1][4:].strip().split("\t")[0]
+            old_path = line[4:].strip().split("\t")[0]
+            path = new_path if new_path != "/dev/null" else old_path
+            for prefix in ("a/", "b/"):
+                if path.startswith(prefix):
+                    path = path[2:]
+                    break
+            files.append((path, []))
+            i += 2
+            continue
+        if line.startswith("@@") and files:
+            files[-1][1].append([])
+        elif files and files[-1][1] and not line.startswith(("diff --git", "index ")):
+            if line == "":
+                line = " "  # models often drop the leading space on blank context lines
+            if line[:1] in (" ", "+", "-"):
+                files[-1][1][-1].append(line)
+        i += 1
+    return files
+
+
+def anchor_patch(text: str, workdir: Path, tracked_files: List[str]) -> Tuple[Optional[str], str]:
+    """
+    Rebuild exact @@ headers for a patch by locating each hunk in the real file.
+    
+    Rules (anything else is refused, never guessed):
+      * the path must exist, or exactly one tracked file must end with it
+        (e.g. "tablib/core.py" -> "src/tablib/core.py");
+      * each hunk must have at least one context/removed line, and that block
+        of old lines must occur exactly once in the file (exact line match,
+        ignoring trailing whitespace);
+      * hunks may not overlap.
+    Returns (patch_text, note) or (None, reason).
+    """
+    files = _parse_loose_patch(text)
+    if not files:
+        return None, "no file headers"
+    out: List[str] = []
+    notes: List[str] = []
+    for path, hunks in files:
+        target = workdir / path
+        if not target.exists():
+            matches = [t for t in tracked_files if t == path or t.endswith("/" + path)]
+            if len(matches) != 1:
+                return None, f"path {path!r} not found ({len(matches)} candidates)"
+            notes.append(f"{path} -> {matches[0]}")
+            path, target = matches[0], workdir / matches[0]
+        file_lines = [l.rstrip() for l in target.read_text(encoding="utf-8", errors="replace").splitlines()]
+        placed: List[Tuple[int, List[str], List[str], List[str]]] = []
+        for hunk in hunks:
+            old = [l[1:] for l in hunk if l[:1] in (" ", "-")]
+            new = [l[1:] for l in hunk if l[:1] in (" ", "+")]
+            if not old:
+                return None, f"hunk in {path} has no context to anchor"
+            key = [l.rstrip() for l in old]
+            hits = [i for i in range(len(file_lines) - len(key) + 1) if file_lines[i:i + len(key)] == key]
+            if len(hits) != 1:
+                return None, f"hunk in {path} matches {len(hits)} places"
+            placed.append((hits[0], old, new, hunk))
+        placed.sort(key=lambda p: p[0])
+        for a, b in zip(placed, placed[1:]):
+            if a[0] + len(a[1]) > b[0]:
+                return None, f"overlapping hunks in {path}"
+        out += [f"--- a/{path}", f"+++ b/{path}"]
+        offset = 0
+        for start, old, new, hunk in placed:
+            out.append(f"@@ -{start + 1},{len(old)} +{start + 1 + offset},{len(new)} @@")
+            out += hunk
+            offset += len(new) - len(old)
+    return "\n".join(out) + "\n", ", ".join(notes) or "hunk line numbers rebuilt"
