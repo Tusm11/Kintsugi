@@ -197,6 +197,25 @@ class AuditLog:
         }
         self.entries.append(entry)
     
+    def log_cache_event(self, run_id: str, event: str, details: Dict[str, Any]) -> None:
+        """
+        Log a v2 fix-cache / context-bucket decision (lookup tier, reuse,
+        bust, bucket used) so cache-driven behaviour is reviewable per Run.
+
+        Args:
+            run_id: The Run ID
+            event: e.g. "lookup", "reuse", "bust", "store", "bucket"
+            details: JSON-serializable details (no patch contents)
+        """
+        entry = {
+            'timestamp': datetime.utcnow().isoformat(),
+            'event_type': 'fix_cache',
+            'run_id': run_id,
+            'cache_event': event,
+            'details': details,
+        }
+        self.entries.append(entry)
+
     def log_run_completion(self, run: Run, final_status: str) -> None:
         """
         Log completion of a run.

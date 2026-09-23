@@ -50,17 +50,74 @@ Contradicting evidence:
 Based on this analysis, provide a specific code fix that addresses the root cause. Your response must include:
 
 1. **Root Cause Analysis**: One sentence confirming why this failure occurred
-2. **Proposed Fix**: The exact code change needed (in diff format or pseudocode)
+2. **Proposed Fix**: The exact code change as a unified diff that `git apply` accepts (not pseudocode; it is applied and tested automatically)
 3. **Why This Works**: One sentence explaining how this fix resolves the issue
 4. **Risk Assessment**: What could go wrong with this fix? (be honest)
 
 Format your response as:
 ROOT_CAUSE: <one sentence>
-PROPOSED_FIX: <code or diff>
+PROPOSED_FIX:
+```diff
+<unified diff against the repository root, with --- a/<path> / +++ b/<path> headers and @@ hunk headers>
+```
 WHY_THIS_WORKS: <one sentence>
 RISK_ASSESSMENT: <honest assessment>
 """
         return prompt
+
+    @staticmethod
+    def generate_from_bucket(bucket_text: str, bucket_tier: int, attempt_number: int, seeded: bool = False) -> str:
+        """
+        Generate a semantic repair prompt from a v2 context bucket.
+
+        The bucket (see src/context_buckets.py) already holds the prioritized,
+        size-bounded context for this attempt; this only wraps it with the
+        instructions and the same response format as ``generate`` so response
+        parsing is unchanged.
+
+        Args:
+            bucket_text: ContextBucket.render() output
+            bucket_tier: 1, 2 or 3 (how much context this attempt gets)
+            attempt_number: 1-based semantic attempt number
+            seeded: True when the bucket carries a near-match seed attribution
+
+        Returns:
+            Prompt string for model
+        """
+        retry_note = ""
+        if attempt_number > 1:
+            retry_note = (
+                f"\nThis is attempt {attempt_number}. A previous attempt for this failure did not "
+                "produce a verified fix, so you have been given broader context.\n"
+            )
+        seed_note = ""
+        if seeded:
+            seed_note = (
+                "\nA verified diagnosis of a *similar* past failure is included as a seed. "
+                "Use it as a hint only; the current diagnosis and logs take precedence.\n"
+            )
+        return f"""You are a code repair expert analyzing a test failure.
+{retry_note}{seed_note}
+Context (bucket {bucket_tier} of 3; only what is below is available):
+
+{bucket_text}
+
+Based on this analysis, provide a specific code fix that addresses the root cause. Your response must include:
+
+1. **Root Cause Analysis**: One sentence confirming why this failure occurred
+2. **Proposed Fix**: The exact code change as a unified diff that `git apply` accepts (not pseudocode; it is applied and tested automatically)
+3. **Why This Works**: One sentence explaining how this fix resolves the issue
+4. **Risk Assessment**: What could go wrong with this fix? (be honest)
+
+Format your response as:
+ROOT_CAUSE: <one sentence>
+PROPOSED_FIX:
+```diff
+<unified diff against the repository root, with --- a/<path> / +++ b/<path> headers and @@ hunk headers>
+```
+WHY_THIS_WORKS: <one sentence>
+RISK_ASSESSMENT: <honest assessment>
+"""
 
 
 class StructuralRepairPrompt:
@@ -100,12 +157,15 @@ class StructuralRepairPrompt:
 Provide a minimal, precise fix for this structural issue. Your response must include:
 
 1. **Problem**: What is malformed?
-2. **Solution**: The exact fix (in diff format)
+2. **Solution**: The exact fix as a unified diff that `git apply` accepts
 3. **Verification**: How to verify this fix works
 
 Format your response as:
 PROBLEM: <what went wrong>
-SOLUTION: <exact fix in diff format>
+SOLUTION:
+```diff
+<unified diff against the repository root, with --- a/<path> / +++ b/<path> headers and @@ hunk headers>
+```
 VERIFICATION: <how to test the fix>
 """
         return prompt
@@ -158,47 +218,6 @@ CONFIDENCE: <0-1 score>
         return prompt
 
 
-class CounterfactualPrompt:
-    """Prompts for counterfactual verification"""
-    
-    @staticmethod
-    def generate(
-        attributed_cause: str,
-        failure_logs: str,
-        proposed_fix: str,
-    ) -> str:
-        """
-        Generate prompt for counterfactual reasoning.
-        
-        Args:
-            attributed_cause: The root cause hypothesis
-            failure_logs: Original test failure
-            proposed_fix: The proposed code fix
-            
-        Returns:
-            Prompt string for model
-        """
-        prompt = f"""Perform a counterfactual analysis: if the proposed fix is applied, would the test pass?
-
-**Attributed Root Cause:**
-{attributed_cause}
-
-**Original Failure:**
-{failure_logs}
-
-**Proposed Fix:**
-{proposed_fix}
-
-Reason through the counterfactual:
-1. **If This Fix Applied**: Describe what the code would do differently
-2. **Chain of Events**: Trace through the execution with the fix in place
-3. **Test Result**: Would the test pass or still fail?
-4. **Confidence**: How certain are you? (0-1 scale)
-
-Format your response as:
-IF_FIX_APPLIED: <what changes>
-CHAIN_OF_EVENTS: <trace execution>
-TEST_RESULT: pass | fail | inconclusive
-CONFIDENCE: <0-1 score>
-"""
-        return prompt
+# CounterfactualPrompt was removed: the counterfactual is now executed (revert the
+# suspected hunks, re-run the failing tests) in AttributionEngine._test_counterfactual,
+# not asked of a model.

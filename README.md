@@ -151,7 +151,7 @@ Scans all externally-sourced content — logs, diffs, commit messages, code comm
 A deterministic, rule-based function — no LLM. Labels each failure as mechanical, structural, or semantic based on exit codes and log patterns. This is the component that makes the entire cost-saving architecture work: if it mislabels things, everything downstream loses its efficiency, so it's treated as safety-critical despite being the simplest piece.
 
 ### Attribution Engine
-For semantic failures, determines the specific root cause using **counterfactual, intervention-based reasoning** — testing whether undoing the suspected cause actually flips the outcome — rather than an LLM guessing from a diff. Produces a structured explanation:
+For semantic failures, determines the specific root cause using **counterfactual, intervention-based reasoning** — testing whether undoing the suspected cause actually flips the outcome — rather than an LLM guessing from a diff. The counterfactual is executed: the suspected cause's diff hunks are reverted in a sandbox worktree and the failing tests re-run (details in [docs/v2/REAL_EXECUTION.md](docs/v2/REAL_EXECUTION.md)). Produces a structured explanation:
 
 ```
 Attribution = {
@@ -223,10 +223,10 @@ Protected paths can only be overridden with an explicit, separately-named flag (
 If a compromised CI job, untrusted Skill, or malicious handler can reach `set_config()` directly, it can weaken scope limits or enable protected-paths override. This is **by design** — the safety boundary is external, not internal — but it means deployment security depends entirely on the deployer correctly isolating configuration changes outside the pipeline execution path.
 
 ### Verifier
-Runs the real test suite in an isolated sandbox. Returns pass/fail — nothing else. **This is the only component in the entire system permitted to mark a Step as `success`.** No handler, model, or confidence score can self-certify.
+Applies the patch in a throwaway git worktree of a configured local checkout (at the failing commit) and runs the repo's real test command; exit code 0 is the only pass, and every setup problem is a recorded failure. Not a security sandbox: tests run as you, with a scrubbed environment and a timeout (see [docs/v2/REAL_EXECUTION.md](docs/v2/REAL_EXECUTION.md)). Returns pass/fail — nothing else. **This is the only component in the entire system permitted to mark a Step as `success`.** No handler, model, or confidence score can self-certify.
 
 ### Action Layer
-The only component allowed to touch the real repository. Opens a PR only after verification passes and Scope Guard clears it. If the Run exhausts its budget or fails the Confidence Gate, this component posts a clear, human-readable escalation with the full trace of what was tried and why.
+The only component allowed to touch the real repository. Opens a real PR through the GitHub REST API (`GITHUB_TOKEN`) only after verification passes and Scope Guard clears it; escalations become GitHub issues. Without a token nothing is posted and nothing is faked; the action is recorded locally. If the Run exhausts its budget or fails the Confidence Gate, this component posts a clear, human-readable escalation with the full trace of what was tried and why.
 
 ### Budget Guard
 Tracks tokens, retries, and wall-clock time spent across a Run, atomically, in one centralized place — preventing budget-leak bugs that would occur if every handler tracked its own spend independently, and preventing race conditions across parallel branches.
@@ -268,9 +268,23 @@ Redis is used only where the actual requirement is **shared, atomic, cross-proce
 | Run/Step state | Shared Hash means any worker can resume a Run after a crash — a Python dict in one process's memory cannot |
 | Priority Queue | Sorted Set with developer-assigned priority as score — reorder and read are both cheap |
 | Kill Switch | Single key, instantly visible across every worker process |
-| Fix-cache (hot/cold tiers) | Sorted Set (hot) + Hash (cold) with TTL — matches spill-not-discard tiering (deferred until real usage data justifies building it) |
+| Fix-cache (hot/cold tiers) | Sorted Set (hot) + Hash (cold) with TTL — spill-not-discard tiering. Built in v2: see [docs/v2/FIX_CACHE.md](docs/v2/FIX_CACHE.md) |
 
 **Not used for:** the audit log. Redis isn't built for durable, queryable, long-term history — that requirement belongs to a real datastore (Postgres or structured files), a different requirement than Redis serves.
+
+---
+
+## v2: Fix-Cache and Context-Bucket Tiering
+
+Semantic repairs now reuse verified fixes for repeat root causes and give each semantic retry a bounded, widening slice of context. Both rest on an attribution-similarity function (fingerprint + weighted match over the stable parts of an `Attribution`, tiered EXACT / NEAR / NONE). A cached patch is never auto-applied without re-running Output Guardrail → Confidence Gate → Scope Guard → Verifier; caching saves diagnosis and generation cost, never verification cost.
+
+Start at [docs/v2/README.md](docs/v2/README.md) (overview, config, v1 bugs fixed along the way), then:
+
+- [Attribution Similarity](docs/v2/ATTRIBUTION_SIMILARITY.md)
+- [Fix-Cache](docs/v2/FIX_CACHE.md)
+- [Context Buckets](docs/v2/CONTEXT_BUCKETS.md)
+- [Semantic path in the pipeline](docs/v2/SEMANTIC_PATH.md)
+- [Real execution: sandbox, Verifier, counterfactual, GitHub Action Layer](docs/v2/REAL_EXECUTION.md)
 
 ---
 
@@ -428,8 +442,8 @@ See `MODEL_CONFIGURATION.md` for complete setup guide.
 These are real, designed pieces of the architecture — deferred in build order, not cut from the design:
 
 - **Skills marketplace** — the extension contract is designed now; opening it to arbitrary third-party authorship comes after the core pyramid is proven on real failures.
-- **Fix-cache** — build once real repeat-failure data exists to justify it; premature caching optimizes a system that hasn't been proven yet.
-- **Context-bucket tiering for semantic retries** — build once measured context bloat on real retries justifies it.
+- ~~**Fix-cache**~~ — **built in v2** ([docs/v2/FIX_CACHE.md](docs/v2/FIX_CACHE.md)). Hit/bust metrics are logged so the tablib test pass can confirm real repeat failures justify it.
+- ~~**Context-bucket tiering for semantic retries**~~ — **built in v2** ([docs/v2/CONTEXT_BUCKETS.md](docs/v2/CONTEXT_BUCKETS.md)).
 - **Self-hosted / local full support** — provider interface supports it; implementation deferred until a real user in that segment exists.
 
 ---
